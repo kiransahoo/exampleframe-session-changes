@@ -110,8 +110,10 @@ How to use the recommendations:
   for more. These ops are expensive and a single sample is usually enough.
 
 Rules:
-- NEVER pass the workload name itself as `podName`. JVM tools call kubectl exec which
-  requires a real pod name; passing a Deployment name silently fails or hits the wrong API.
+- NEVER pass the workload name itself as `podName` WITHOUT resolving first. JVM tools
+  call kubectl exec which requires a real pod name; passing a Deployment name silently
+  fails or hits the wrong API. After `resolvePodsForWorkload`, use the pod name the tool
+  returns - even when it equals the workload name (a bare pod is its own pod name).
 - NEVER call `listPods(namespace)` and filter by name prefix as a workaround.
   That's brittle (sister deployments share prefixes, prefixes truncate) and
   produces wrong-pod hallucinations. Use `resolvePodsForWorkload` - it resolves via

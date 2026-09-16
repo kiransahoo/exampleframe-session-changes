@@ -361,8 +361,9 @@ public class KubernetesPodTools extends KubernetesToolSupport {
                         } else {
                             kind = "PODS (label app=" + workloadName + ")";
                             bareWarning = String.format(
-                                    "NOTE: no controller named '%s' exists, but these label-matched pods are "
-                                    + "owned by: %s. The mapping's `workload` should name that controller. "
+                                    "NOTE: no controller named '%s' exists; these label-matched pods have "
+                                    + "owners among: %s (some may be ownerless). The mapping's `workload` "
+                                    + "should name the right controller. "
                                     + "Proceeding with the matched pods - tell the user they were matched by "
                                     + "label, not by workload name.%n%n",
                                     workloadName, String.join(", ", ownerNames));
