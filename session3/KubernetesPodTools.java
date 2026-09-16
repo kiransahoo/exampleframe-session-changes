@@ -307,10 +307,12 @@ public class KubernetesPodTools extends KubernetesToolSupport {
                         kind = "BARE POD (no controller)";
                         bareWarning = String.format(
                                 "NOTE: '%s' is a bare pod - no controller owns it, so it will not be "
-                                + "rescheduled or scaled. Proceed with diagnostics on this pod (logs and "
-                                + "describe always; exec-based tools only while it is Running). The "
-                                + "mapping's `workload` should name a controller; for a permanent setup "
-                                + "convert this pod to a Deployment or fix the mapping.%n%n", workloadName);
+                                + "rescheduled or scaled. Proceed with approval-free diagnostics only "
+                                + "(describe, events, logs, thread/GC inspection while Running). Do NOT "
+                                + "call approval-gated operations (heap dump, debug sidecar) unless the "
+                                + "user explicitly asked for them - recommend them in your report instead. "
+                                + "The mapping's `workload` should name a controller; for a permanent "
+                                + "setup convert this pod to a Deployment or fix the mapping.%n%n", workloadName);
                     } else {
                         String ownerDesc = owners.stream()
                                 .map(o -> o.getKind() + "/" + o.getName())
@@ -356,8 +358,9 @@ public class KubernetesPodTools extends KubernetesToolSupport {
                             bareWarning = String.format(
                                     "NOTE: no controller named '%s' exists; these ownerless pods matched by "
                                     + "label app=%s only - tell the user they were label-matched. Proceed "
-                                    + "with diagnostics. The mapping's `workload` should name a controller "
-                                    + "for a permanent setup.%n%n", workloadName, workloadName);
+                                    + "with approval-free diagnostics only; no approval-gated operations "
+                                    + "unless the user explicitly asked. The mapping's `workload` should "
+                                    + "name a controller for a permanent setup.%n%n", workloadName, workloadName);
                         } else {
                             kind = "PODS (label app=" + workloadName + ")";
                             bareWarning = String.format(
