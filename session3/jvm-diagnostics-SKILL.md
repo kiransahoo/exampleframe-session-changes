@@ -14,7 +14,7 @@ description: Use this skill for JVM deep diagnostics in Kubernetes workloads, in
 ## Workflow
 
 1. Confirm target pod and namespace
-2. If no in-container JDK tooling exists, finish with approval-free tools and recommend `deployDiagnosticsSidecar` in the report - deploy it only when the user explicitly asked for this diagnostic
+2. Deploy diagnostics sidecar when needed
 3. Start with `analyzeJvm` for broad evidence
 4. Run low-risk diagnostics next (process list, thread dump, JVM stats, class histogram)
 5. Prefer JFR (`captureAndAnalyzeJfr` or `captureJfrProfile`) for production performance profiling before heap dump

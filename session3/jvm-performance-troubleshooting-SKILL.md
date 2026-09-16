@@ -18,7 +18,7 @@ description: Use this skill for production-safe JVM performance profiling - thre
 3. Run `listJavaProcesses` and `captureThreadDump` when CPU contention or hangs are suspected
 4. Run `getGCStats` and `captureMemoryHistogram` for memory pressure signals
 5. For latency/CPU profiling, use `captureAndAnalyzeJfr` (preferred) or `captureJfrProfile`
-6. RECOMMEND `captureHeapDump` in the report; call it ONLY when the user explicitly requested a heap dump (it is approval-gated)
+6. Use `captureHeapDump` ONLY as last resort after approval
 7. Summarize findings as Confirmed vs Hypothesis with exact tool failures under Evidence Gaps
 
 ## CRITICAL: Output Fidelity

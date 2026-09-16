@@ -228,11 +228,8 @@ abstract class JvmDiagnosticsSupport {
         }
         if (!explicitlyRequested) {
             return "Error: no diagnostics sidecar is installed in this pod, and installing one is "
-                    + "a write action that needs human approval. If the USER explicitly asked for "
-                    + "this diagnostic, call deployDiagnosticsSidecar to request approval, then "
-                    + "retry. Otherwise finish the investigation with the evidence you already "
-                    + "have and RECOMMEND deployDiagnosticsSidecar in your report - do not "
-                    + "trigger an approval the user did not ask for.";
+                    + "a write action that needs human approval. Call deployDiagnosticsSidecar to "
+                    + "request it, then retry this diagnostic.";
         }
 
         String ns = resolveNamespace(namespace);
