@@ -1,0 +1,96 @@
+version: '3.8'
+
+# #ExampleFrame# Orchestrator with A2A Remote Agents
+#
+# Architecture:
+# - orchestrator: SupervisorAgent + Analysis Agent (this service)
+# - kubernetes-agent: Remote K8s agent (A2A protocol)
+# - oracle-agent: Remote Oracle agent (A2A protocol)
+# - redis: Thread history persistence
+#
+# Features:
+# - A2A Protocol with AgentCardProvider
+# - Human-in-the-Loop (HITL)
+# - Thread history with Redis
+# - Message summarization
+# - SSE streaming
+
+services:
+  orchestrator:
+    build: .
+    container_name: #exampleframe#-orchestrator
+    ports:
+      - "8083:8083"
+    environment:
+      - SPRING_PROFILES_ACTIVE=redis
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
+      # A2A Remote Agent URLs
+      - K8S_AGENT_ENABLED=${K8S_AGENT_ENABLED:-true}
+      - K8S_AGENT_URL=${K8S_AGENT_URL:-http://kubernetes-agent:8081}
+      - ORACLE_AGENT_ENABLED=${ORACLE_AGENT_ENABLED:-true}
+      - ORACLE_AGENT_URL=${ORACLE_AGENT_URL:-http://oracle-agent:8082}
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8083/actuator/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - #exampleframe#-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: #exampleframe#-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - #exampleframe#-network
+
+  # Example: Remote Kubernetes Agent (A2A)
+  # kubernetes-agent:
+  #   image: #exampleframe#/kubernetes-agent:latest
+  #   ports:
+  #     - "8081:8081"
+  #   environment:
+  #     - KUBECONFIG=/etc/kubernetes/config
+  #   volumes:
+  #     - ~/.kube/config:/etc/kubernetes/config:ro
+  #   networks:
+  #     - #exampleframe#-network
+
+  # Example: Remote Oracle Agent (A2A)
+  # oracle-agent:
+  #   image: #exampleframe#/oracle-agent:latest
+  #   ports:
+  #     - "8082:8082"
+  #   environment:
+  #     - ORACLE_URL=jdbc:oracle:thin:@//db-host:1521/ORCL
+  #     - ORACLE_USER=${ORACLE_USER}
+  #     - ORACLE_PASSWORD=${ORACLE_PASSWORD}
+  #   networks:
+  #     - #exampleframe#-network
+
+networks:
+  #exampleframe#-network:
+    driver: bridge
+
+volumes:
+  redis-data:
