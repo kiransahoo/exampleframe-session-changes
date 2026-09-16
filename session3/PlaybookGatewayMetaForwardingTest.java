@@ -453,6 +453,31 @@ class PlaybookGatewayMetaForwardingTest {
     }
 
     @Test
+    void theForwardedServiceParamKeepsTheUsersOwnWordNotTheMappingKey() {
+        // The user says "pay-svc" (a configured alias); routing resolves the canonical
+        // payments-api, but the CELL must receive the user's word - the direct door
+        // passes it through extraction, and rewriting it to the mapping key degraded a
+        // cell agent's pod/label search (the esign -> javahealthy defect).
+        String q = "run the service-slow playbook for pay-svc over the last 24h";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "pay-svc", "timeRange", "24h")));
+        when(appContextResolver.analyzeText(eq(q)))
+                .thenReturn(new AppContextResolver.TextAnalysis("payments-api", false, false));
+        when(appContextResolver.getServiceContext("payments-api"))
+                .thenReturn(Map.of("aliases", "payments,pay-svc,PaymentsService"));
+        when(domainCellRouter.owningDomain("payments-api")).thenReturn(Optional.of("payments"));
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenReturn("CELL REPORT");
+
+        run(q, "t-surface");
+
+        verify(delegationExecutionService).delegateToAgentPinned(eq("payments-cell"), eq(q), eq("t-surface"),
+                argThat(m -> "pay-svc".equals(m.get("service"))
+                        && "payments".equals(m.get("domain"))), isNull());
+    }
+
+    @Test
     void hallucinatedExtractionCannotOverrideTheTextNamedService() {
         // Extraction claims claims-api; the user's own words name payments-api. The text wins,
         // so the playbook cannot be routed to a domain the user never asked for.

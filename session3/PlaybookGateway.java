@@ -504,7 +504,15 @@ public class PlaybookGateway {
         }
 
         if (decision.service() != null) {
-            params.put("service", decision.service());
+            // The forwarded service param carries the USER'S OWN WORD for the service
+            // whenever the request's text holds one - the canonical mapping key exists
+            // for ROUTING, not for rewriting the request. The direct door passes the
+            // user's word through extraction, and a cell agent's pod/label search can
+            // behave differently on the mapping key than on the name the user typed
+            // (service "esign" degraded to its mapping key "javahealthy" and matched
+            // nothing) - so rewriting it opened a door asymmetry. The canonical name
+            // still travels when the text holds no surface form (ask-flow replies).
+            params.put("service", surfaceFormOf(decision.service(), originalQuery));
         }
 
         // Collect only what the user alone can supply - timeRange, and the service itself after
@@ -839,6 +847,39 @@ public class PlaybookGateway {
         }
         return MetaPlaybookRouting.agentKeyOf(federationProperties.domainsOrEmpty(), domain) != null
                 ? service : null;
+    }
+
+    /**
+     * The name the REQUEST TEXT itself uses for this service - the canonical name if the
+     * text says it, else the first configured alias the text contains, else (no surface
+     * form in the text at all - the bare-domain reply flow) the canonical name. Word
+     * boundaries treat hyphens as name characters, mirroring alias matching, so
+     * "esign-batch" never counts as a mention of "esign".
+     */
+    private String surfaceFormOf(String canonicalService, String originalQuery) {
+        if (appContextResolver == null) {
+            return canonicalService;
+        }
+        List<String> candidates = new ArrayList<>();
+        candidates.add(canonicalService);
+        Map<String, String> ctx = appContextResolver.getServiceContext(canonicalService);
+        String aliases = ctx != null ? ctx.get("aliases") : null;
+        if (aliases != null) {
+            for (String alias : aliases.split(",")) {
+                String trimmed = alias.trim();
+                if (!trimmed.isEmpty()) {
+                    candidates.add(trimmed);
+                }
+            }
+        }
+        for (String candidate : candidates) {
+            java.util.regex.Pattern p = java.util.regex.Pattern.compile(
+                    "(?i)(?<![A-Za-z0-9_-])" + java.util.regex.Pattern.quote(candidate) + "(?![A-Za-z0-9_-])");
+            if (p.matcher(originalQuery).find()) {
+                return candidate;
+            }
+        }
+        return canonicalService;
     }
 
     /** The configured delegation tool name for a cell (what the UI labels the panel with). */

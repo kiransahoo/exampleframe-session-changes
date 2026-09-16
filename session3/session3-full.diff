@@ -521,7 +521,7 @@ index 63fee45..baf533d 100644
  
  
 diff --git a/#exampleframe#-orchestrator/src/main/java/com/#exampleframe#/orchestrator/service/PlaybookGateway.java b/#exampleframe#-orchestrator/src/main/java/com/#exampleframe#/orchestrator/service/PlaybookGateway.java
-index 9840106..bb35a84 100644
+index 9840106..4963462 100644
 --- a/#exampleframe#-orchestrator/src/main/java/com/#exampleframe#/orchestrator/service/PlaybookGateway.java
 +++ b/#exampleframe#-orchestrator/src/main/java/com/#exampleframe#/orchestrator/service/PlaybookGateway.java
 @@ -149,6 +149,19 @@ public class PlaybookGateway {
@@ -677,7 +677,7 @@ index 9840106..bb35a84 100644
              String originalQuery,
              String threadId,
              String userId) {
-@@ -449,7 +499,7 @@ public class PlaybookGateway {
+@@ -449,16 +499,27 @@ public class PlaybookGateway {
                      match.playbookId(), service);
              pendingMetaForwards.put(threadId, new PendingMetaForward(
                      match.playbookId(), match.definition(), params, null, callerProvidedKeys,
@@ -686,7 +686,18 @@ index 9840106..bb35a84 100644
              return Flux.just(buildAssistantEvent(decision.message()));
          }
  
-@@ -459,6 +509,9 @@ public class PlaybookGateway {
+         if (decision.service() != null) {
+-            params.put("service", decision.service());
++            // The forwarded service param carries the USER'S OWN WORD for the service
++            // whenever the request's text holds one - the canonical mapping key exists
++            // for ROUTING, not for rewriting the request. The direct door passes the
++            // user's word through extraction, and a cell agent's pod/label search can
++            // behave differently on the mapping key than on the name the user typed
++            // (service "esign" degraded to its mapping key "javahealthy" and matched
++            // nothing) - so rewriting it opened a door asymmetry. The canonical name
++            // still travels when the text holds no surface form (ask-flow replies).
++            params.put("service", surfaceFormOf(decision.service(), originalQuery));
+         }
  
          // Collect only what the user alone can supply - timeRange, and the service itself after
          // a bare domain choice. Infrastructure params stay unfilled for the cell to resolve.
@@ -696,7 +707,7 @@ index 9840106..bb35a84 100644
          List<MissingParam> userOnly = resolver.findMissingParams(
                          match.definition().params(), params, playbookProperties.paramDefinitions())
                  .stream()
-@@ -471,7 +524,8 @@ public class PlaybookGateway {
+@@ -471,7 +532,8 @@ public class PlaybookGateway {
                      userOnly.stream().map(MissingParam::key).toList());
              pendingMetaForwards.put(threadId, new PendingMetaForward(
                      match.playbookId(), match.definition(), params, decision.domain(), callerProvidedKeys,
@@ -706,7 +717,7 @@ index 9840106..bb35a84 100644
              return Flux.just(buildParamPromptEvent(
                      match.playbookId(), match.definition().name(), userOnly));
          }
-@@ -483,23 +537,39 @@ public class PlaybookGateway {
+@@ -483,23 +545,39 @@ public class PlaybookGateway {
          // its namespaces and schemas. Values the user or the API caller stated themselves
          // (callerProvidedKeys, including reply-volunteered ones) do travel: user provenance
          // outranks either mapping.
@@ -750,7 +761,7 @@ index 9840106..bb35a84 100644
  
          investigationStateService.recordUserMessage(threadId, originalQuery);
  
-@@ -509,7 +579,7 @@ public class PlaybookGateway {
+@@ -509,7 +587,7 @@ public class PlaybookGateway {
              // delegation instead of the request silently dying to context-free ReAct.
              pendingMetaForwards.put(threadId, new PendingMetaForward(
                      match.playbookId(), match.definition(), params, decision.domain(), callerProvidedKeys,
@@ -759,7 +770,7 @@ index 9840106..bb35a84 100644
              return Flux.just(ServerSentEvent.<String>builder()
                      .event("error")
                      .data("Another request is already streaming for this conversation. "
-@@ -617,6 +687,7 @@ public class PlaybookGateway {
+@@ -617,6 +695,7 @@ public class PlaybookGateway {
              Map<String, String> params,
              @Nullable String chosenDomain,
              Set<String> callerProvidedKeys,
@@ -767,7 +778,7 @@ index 9840106..bb35a84 100644
              List<String> awaiting,
              String originalUserMessage,
              Instant createdAt
-@@ -743,7 +814,31 @@ public class PlaybookGateway {
+@@ -743,7 +822,64 @@ public class PlaybookGateway {
  
          PlaybookMatch match = new PlaybookMatch(pending.playbookId(), pending.definition(), false);
          return forwardToOwningCell(match, params, chosenDomain, callerKeys,
@@ -797,6 +808,39 @@ index 9840106..bb35a84 100644
 +        }
 +        return MetaPlaybookRouting.agentKeyOf(federationProperties.domainsOrEmpty(), domain) != null
 +                ? service : null;
++    }
++
++    /**
++     * The name the REQUEST TEXT itself uses for this service - the canonical name if the
++     * text says it, else the first configured alias the text contains, else (no surface
++     * form in the text at all - the bare-domain reply flow) the canonical name. Word
++     * boundaries treat hyphens as name characters, mirroring alias matching, so
++     * "esign-batch" never counts as a mention of "esign".
++     */
++    private String surfaceFormOf(String canonicalService, String originalQuery) {
++        if (appContextResolver == null) {
++            return canonicalService;
++        }
++        List<String> candidates = new ArrayList<>();
++        candidates.add(canonicalService);
++        Map<String, String> ctx = appContextResolver.getServiceContext(canonicalService);
++        String aliases = ctx != null ? ctx.get("aliases") : null;
++        if (aliases != null) {
++            for (String alias : aliases.split(",")) {
++                String trimmed = alias.trim();
++                if (!trimmed.isEmpty()) {
++                    candidates.add(trimmed);
++                }
++            }
++        }
++        for (String candidate : candidates) {
++            java.util.regex.Pattern p = java.util.regex.Pattern.compile(
++                    "(?i)(?<![A-Za-z0-9_-])" + java.util.regex.Pattern.quote(candidate) + "(?![A-Za-z0-9_-])");
++            if (p.matcher(originalQuery).find()) {
++                return candidate;
++            }
++        }
++        return canonicalService;
      }
  
      /** The configured delegation tool name for a cell (what the UI labels the panel with). */
@@ -883,6 +927,82 @@ index 18a308c..bfa895f 100644
  
          if (candidates.isEmpty()) {
              noMatchCounter.increment();
+diff --git a/#exampleframe#-orchestrator/src/main/resources/static/index.html b/#exampleframe#-orchestrator/src/main/resources/static/index.html
+index 2d4fa52..f167ad6 100644
+--- a/#exampleframe#-orchestrator/src/main/resources/static/index.html
++++ b/#exampleframe#-orchestrator/src/main/resources/static/index.html
+@@ -5259,6 +5259,13 @@
+             return;
+         }
+ 
++        // A child can CHAIN approvals: while the resume below streams, the next
++        // child-tool-confirm event calls showHitlDialog, which REPLACES pendingHitl.
++        // Everything after the await must only touch the approval WE are acting on -
++        // blindly nulling pendingHitl at the end would clobber the chained one and
++        // its visible dialog's buttons would hit the !pendingHitl guard above.
++        const thisHitl = pendingHitl;
++
+         const dialogDiv = document.getElementById('hitl-dialog');
+         if (dialogDiv) dialogDiv.remove();
+ 
+@@ -5288,10 +5295,17 @@
+             showToast('Failed: ' + error.message, 'error');
+         }
+ 
+-        pendingHitl = null;
++        if (pendingHitl === thisHitl) {
++            pendingHitl = null;        // nothing chained - this approval is fully done
++        }
+     }
+ 
+ async function resumeOrchestrator(toolFeedbacks) {
++    // Capture the approval this resume acts on: a CHAINED approval arriving via
++    // processStream replaces pendingHitl, and the status it sets ('pending') must
++    // survive our finally - otherwise the new dialog shows over a 'ready' status
++    // and the race clobbers it.
++    const hitlAtStart = pendingHitl;
+     const baseUrl = document.getElementById('baseUrl').value;
+     const url = `${baseUrl}/api/agents/orchestrator_agent/resume`;
+ 
+@@ -5319,16 +5333,21 @@ async function resumeOrchestrator(toolFeedbacks) {
+     } catch (error) {
+         console.error('[HITL-RESUME] Error:', error);
+         showToast('Resume failed: ' + error.message, 'error');
+-        updateStatus('error');
++        if (pendingHitl === hitlAtStart) updateStatus('error');
+     } finally {
+         isStreaming = false;
+         document.getElementById('sendBtn').disabled = false;
+         finalizeStreamingMessage();
+-        updateStatus('ready');
++        if (pendingHitl === hitlAtStart) updateStatus('ready');   // a chained HITL keeps 'pending'
+     }
+ }
+ 
+    async function resumeChildAgent(agentName, taskId, toolFeedbacks) {
++    // Capture the approval this resume acts on: a CHAINED approval arriving via
++    // processStream replaces pendingHitl, and the status it sets ('pending') must
++    // survive our finally - otherwise the new dialog shows over a 'ready' status
++    // and the race clobbers it.
++    const hitlAtStart = pendingHitl;
+     const baseUrl = document.getElementById('baseUrl').value;
+     const url = `${baseUrl}/api/agents/orchestrator_agent/resume-child`;
+ 
+@@ -5356,12 +5375,12 @@ async function resumeOrchestrator(toolFeedbacks) {
+     } catch (error) {
+         console.error('[HITL-RESUME] Error:', error);
+         showToast('Resume failed: ' + error.message, 'error');
+-        updateStatus('error');
++        if (pendingHitl === hitlAtStart) updateStatus('error');
+     } finally {
+         isStreaming = false;
+         document.getElementById('sendBtn').disabled = false;
+         finalizeStreamingMessage();
+-        updateStatus('ready');
++        if (pendingHitl === hitlAtStart) updateStatus('ready');   // a chained HITL keeps 'pending'
+     }
+ }
+ 
 diff --git a/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/api/controller/A2aIngressHitlTest.java b/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/api/controller/A2aIngressHitlTest.java
 index 92473d2..36ce7d9 100644
 --- a/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/api/controller/A2aIngressHitlTest.java
@@ -1088,7 +1208,7 @@ index 32cb62f..ca8658a 100644
  
      // ---- Utility ----
 diff --git a/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/service/PlaybookGatewayMetaForwardingTest.java b/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/service/PlaybookGatewayMetaForwardingTest.java
-index 311a90d..e9b44fb 100644
+index 311a90d..b699936 100644
 --- a/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/service/PlaybookGatewayMetaForwardingTest.java
 +++ b/#exampleframe#-orchestrator/src/test/java/com/#exampleframe#/orchestrator/service/PlaybookGatewayMetaForwardingTest.java
 @@ -35,6 +35,7 @@ import java.util.Optional;
@@ -1099,7 +1219,7 @@ index 311a90d..e9b44fb 100644
  import static org.mockito.ArgumentMatchers.anyMap;
  import static org.mockito.ArgumentMatchers.anyString;
  import static org.mockito.ArgumentMatchers.argThat;
-@@ -332,12 +333,125 @@ class PlaybookGatewayMetaForwardingTest {
+@@ -332,12 +333,150 @@ class PlaybookGatewayMetaForwardingTest {
  
      @Test
      void noExplicitReferencePassesThroughToReact() {
@@ -1223,10 +1343,35 @@ index 311a90d..e9b44fb 100644
 +                argThat(m -> !m.containsKey("playbookId")), isNull());
 +    }
 +
++    @Test
++    void theForwardedServiceParamKeepsTheUsersOwnWordNotTheMappingKey() {
++        // The user says "pay-svc" (a configured alias); routing resolves the canonical
++        // payments-api, but the CELL must receive the user's word - the direct door
++        // passes it through extraction, and rewriting it to the mapping key degraded a
++        // cell agent's pod/label search (the esign -> javahealthy defect).
++        String q = "run the service-slow playbook for pay-svc over the last 24h";
++        explicit(q, "service-slow");
++        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
++                Map.of("service", "pay-svc", "timeRange", "24h")));
++        when(appContextResolver.analyzeText(eq(q)))
++                .thenReturn(new AppContextResolver.TextAnalysis("payments-api", false, false));
++        when(appContextResolver.getServiceContext("payments-api"))
++                .thenReturn(Map.of("aliases", "payments,pay-svc,PaymentsService"));
++        when(domainCellRouter.owningDomain("payments-api")).thenReturn(Optional.of("payments"));
++        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
++                .thenReturn("CELL REPORT");
++
++        run(q, "t-surface");
++
++        verify(delegationExecutionService).delegateToAgentPinned(eq("payments-cell"), eq(q), eq("t-surface"),
++                argThat(m -> "pay-svc".equals(m.get("service"))
++                        && "payments".equals(m.get("domain"))), isNull());
++    }
++
      @Test
      void hallucinatedExtractionCannotOverrideTheTextNamedService() {
          // Extraction claims claims-api; the user's own words name payments-api. The text wins,
-@@ -434,7 +548,7 @@ class PlaybookGatewayMetaForwardingTest {
+@@ -434,7 +573,7 @@ class PlaybookGatewayMetaForwardingTest {
          // A topic pivot - even one naming a known service - is its own request.
          when(appContextResolver.analyzeText(anyString()))
                  .thenReturn(new AppContextResolver.TextAnalysis("checkout-service", false, false));
@@ -1235,7 +1380,7 @@ index 311a90d..e9b44fb 100644
          Optional<Flux<ServerSentEvent<String>>> result = gateway.tryExecute(
                  "forget the run - why is checkout-service suddenly throwing 500s today?", "t-pivot", "user-1", null);
  
-@@ -452,7 +566,7 @@ class PlaybookGatewayMetaForwardingTest {
+@@ -452,7 +591,7 @@ class PlaybookGatewayMetaForwardingTest {
          assertThat(ack).contains("dropped the pending");
  
          // Pending is gone: the next message routes normally.
