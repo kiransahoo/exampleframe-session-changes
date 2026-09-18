@@ -762,4 +762,71 @@ class AppContextDelegationTest {
         }
         return map;
     }
+
+    // ---- Cell envelope: caller-provided service label (cell tools declare no service slot) ----
+
+    @Nested
+    class CellEnvelopeServiceLabel {
+
+        private void configureCell(String agentKey) {
+            RemoteAgentProperties props = mock(RemoteAgentProperties.class);
+            when(props.parameters()).thenReturn(orderedMap(
+                    "task", "The investigation to run in the cell",
+                    "timeRange", "Time window the user stated"));
+            when(props.parameterDefaults()).thenReturn(Map.of());
+            when(props.layer()).thenReturn("domain");
+            when(agentConfigResolver.getAgentConfigs()).thenReturn(Map.of(agentKey, props));
+        }
+
+        /**
+         * The meta's ask-flow puts the USER'S OWN service answer in params; the word is often
+         * absent from the task text. If the receiving cell demotes the forward to ReAct, the
+         * envelope label is the only place it survives - it must be emitted even though cell
+         * parameter maps deliberately declare no service slot.
+         */
+        @Test
+        void callerServiceSurvivesInTheCellEnvelope() {
+            configureCell("claims-cell");
+
+            String input = delegationService.buildAgentInput(
+                    "claims-cell",
+                    "why is it slow in the last 2h ?",
+                    THREAD_ID,
+                    Map.of("service", "esign"),
+                    null);
+
+            assertThat(input).contains("[Service: esign]");
+        }
+
+        @Test
+        void noLabelWhenNoCallerService() {
+            configureCell("claims-cell");
+
+            String input = delegationService.buildAgentInput(
+                    "claims-cell",
+                    "list pods in the default namespace",
+                    THREAD_ID,
+                    Map.of(),
+                    null);
+
+            assertThat(input).doesNotContain("[Service:");
+        }
+
+        /** Child-agent envelopes never carried this label; they must stay byte-identical. */
+        @Test
+        void childAgentEnvelopeIsUntouched() {
+            configureAgent("kubernetes",
+                    orderedMap("task", "...", "namespace", "K8s namespace"),
+                    Map.of());
+
+            String input = delegationService.buildAgentInput(
+                    "kubernetes",
+                    "list pods in the default namespace",
+                    THREAD_ID,
+                    Map.of("service", "esign"),
+                    null);
+
+            assertThat(input).doesNotContain("[Service:");
+        }
+    }
 }

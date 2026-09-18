@@ -964,6 +964,21 @@ public class DelegationExecutionService {
             }
         }
 
+        // On a CELL delegation (layer=domain) a caller-provided service survives even though
+        // cell tools deliberately advertise no free-text service slot. The meta's ask-flow
+        // puts the USER'S OWN answer in params - it is often absent from the task text
+        // itself - and if the receiving cell demotes the forward to ReAct, this label is the
+        // only place that word still exists. The delegation callback drops undeclared
+        // model-supplied keys before this point, so a service here can only come from
+        // deterministic code (the playbook forward), never from the model. Child-agent
+        // envelopes (azure/oracle/k8s) are NOT touched: they never carried this label.
+        String callerService = params.get("service");
+        if (callerService != null && !callerService.isBlank()
+                && config != null && "domain".equals(config.layer())
+                && (config.parameters() == null || !config.parameters().containsKey("service"))) {
+            input.append("[Service: ").append(callerService.trim()).append("] ");
+        }
+
         input.append(task);
         return input.toString();
     }

@@ -1,0 +1,110 @@
+# ============================================================================
+# META-ORCHESTRATOR PROFILE (cell-per-domain architecture)
+#
+# Run the same orchestrator binary with SPRING_PROFILES_ACTIVE=meta to act as
+# the thin federation layer from docs/#exampleframe#-architecture-roadmap.html:
+# each domain's self-contained #ExampleFrame# is just another A2A remote agent, and
+# the meta layer routes each request (and each pushed incident) to the right
+# domain cell - fanning out and merging only when a question spans domains.
+#
+# Domain resolution comes from the same service mapping the orchestrator already
+# uses: a service carries `domain: claims` alongside its other keys (editable at
+# runtime via POST /api/settings/service-context - no schema change).
+# ============================================================================
+#exampleframe#:
+  orchestrator:
+    federation:
+      enabled: true
+      # Data-governance boundary (default true): a delegation to a domain cell carries
+      # only that cell's own prior findings - never another domain's findings, the
+      # thread's global hypothesis, or the meta conversation history. Cross-domain
+      # correlation happens only at the meta when presenting to the user.
+      findings-isolation: true
+      # domain (mapping's `domain` value) -> which remote-agent entry is its cell.
+      # allowed-groups (optional): Entra group object IDs / app roles permitted to route
+      # into this domain. Empty = any authenticated user. ADMIN and SERVICE always pass.
+      # Unauthorized callers get 403 - never a silent fallback to local handling.
+      domains:
+        claims:
+          agent-key: claims-cell
+          allowed-groups: ${CLAIMS_DOMAIN_GROUPS:}
+        sales:
+          agent-key: sales-cell
+          allowed-groups: ${SALES_DOMAIN_GROUPS:}
+        data:
+          agent-key: data-cell
+          allowed-groups: ${DATA_DOMAIN_GROUPS:}
+      # Optional: where services without a `domain` mapping go. Leave unset to
+      # investigate them locally on the meta orchestrator.
+      # default-domain: claims
+
+    # Each domain cell is an ordinary remote agent - the cell's own orchestrator
+    # exposes /a2a/message like every other agent. The LLM sees one delegation
+    # tool per domain; incidents are handed off deterministically by domain.
+    remote-agents:
+      claims-cell:
+        url: ${CLAIMS_CELL_URL:http://tb-orchestrator.tb-claims:8081}
+        name: ${CLAIMS_CELL_AGENT_NAME:orchestrator_agent__claims}
+        description: "Claims domain #ExampleFrame# cell - full investigation stack (K8s, Oracle, Azure Monitor, JVM, dbt) for claims services"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        layer: domain
+        investigation-priority: 1
+        tool-name: delegateToClaimsCell
+        when-to-use: "Any investigation for a service owned by the Claims domain"
+        capabilities:
+          - full-domain-investigation
+        parameters:
+          task: "The investigation to run in the claims cell"
+          # NO free-text "service" slot here, deliberately: the LLM filled it when the
+          # user named no service, silently narrowing a namespace-wide question to one
+          # service and reporting the scoped negative as global. The cell derives scope
+          # from the verbatim task text (it is authoritative for its own services), and
+          # the deterministic playbook forward passes its service param outside this
+          # schema. The slot is not advertised (additionalProperties:false), and the
+          # delegation callback drops any undeclared key a provider lets through.
+          timeRange: "Time window the user stated, verbatim, in compact form (e.g. 2h, 24h, 7d). Omit when the user gave none."
+      sales-cell:
+        url: ${SALES_CELL_URL:http://tb-orchestrator.tb-sales:8081}
+        name: ${SALES_CELL_AGENT_NAME:orchestrator_agent__sales}
+        description: "Sales domain #ExampleFrame# cell - full investigation stack for sales services"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        layer: domain
+        investigation-priority: 1
+        tool-name: delegateToSalesCell
+        when-to-use: "Any investigation for a service owned by the Sales domain"
+        capabilities:
+          - full-domain-investigation
+        parameters:
+          task: "The investigation to run in the sales cell"
+          # NO free-text "service" slot here, deliberately: the LLM filled it when the
+          # user named no service, silently narrowing a namespace-wide question to one
+          # service and reporting the scoped negative as global. The cell derives scope
+          # from the verbatim task text (it is authoritative for its own services), and
+          # the deterministic playbook forward passes its service param outside this
+          # schema. The slot is not advertised (additionalProperties:false), and the
+          # delegation callback drops any undeclared key a provider lets through.
+          timeRange: "Time window the user stated, verbatim, in compact form (e.g. 2h, 24h, 7d). Omit when the user gave none."
+      data-cell:
+        url: ${DATA_CELL_URL:http://tb-orchestrator.tb-data:8081}
+        name: ${DATA_CELL_AGENT_NAME:orchestrator_agent__data}
+        description: "Data domain #ExampleFrame# cell - full investigation stack for data services"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        layer: domain
+        investigation-priority: 1
+        tool-name: delegateToDataCell
+        when-to-use: "Any investigation for a service owned by the Data domain"
+        capabilities:
+          - full-domain-investigation
+        parameters:
+          task: "The investigation to run in the data cell"
+          # NO free-text "service" slot here, deliberately: the LLM filled it when the
+          # user named no service, silently narrowing a namespace-wide question to one
+          # service and reporting the scoped negative as global. The cell derives scope
+          # from the verbatim task text (it is authoritative for its own services), and
+          # the deterministic playbook forward passes its service param outside this
+          # schema. The slot is not advertised (additionalProperties:false), and the
+          # delegation callback drops any undeclared key a provider lets through.
+          timeRange: "Time window the user stated, verbatim, in compact form (e.g. 2h, 24h, 7d). Omit when the user gave none."

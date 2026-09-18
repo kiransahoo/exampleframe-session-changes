@@ -25,6 +25,7 @@ import com.#exampleframe#.orchestrator.thread.history.store.ThreadStore;
 import com.#exampleframe#.orchestrator.tools.AgentInvocationService;
 import com.#exampleframe#.orchestrator.exception.ChildAgentHitlException;
 import com.#exampleframe#.orchestrator.exception.ChildAgentHitlRuntimeException;
+import io.a2a.spec.AgentCard;
 import org.jspecify.annotations.Nullable;
 import org.springframework.beans.factory.annotation.Autowired;
 
@@ -569,10 +570,28 @@ public class A2aIngressController {
     @org.springframework.beans.factory.annotation.Value("${#exampleframe#.orchestrator.federation.cell-name:}")
     private String cellName = "";
 
-    /** The name this cell announces on its A2A card - what the meta's remote-agents entry must use. */
+    /** The registered self-card, when the A2A server autoconfiguration is active - already
+     *  renamed by {@link com.#exampleframe#.orchestrator.config.CellAgentCardPostProcessor}. */
+    private @Nullable AgentCard selfCard;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSelfCard(@Nullable AgentCard selfCard) {
+        this.selfCard = selfCard;
+    }
+
+    /** The name this cell announces on its A2A card - what the meta's remote-agents entry must use.
+     *  Prefers the actual {@link io.a2a.spec.AgentCard} bean (already renamed by
+     *  {@code CellAgentCardPostProcessor}), so this endpoint reports the name that is REALLY
+     *  registered in Nacos even if {@code spring.ai.alibaba.a2a.server.card.name} and
+     *  {@code #exampleframe#.orchestrator.agent.name} are overridden apart from each other. The
+     *  {@code CellAgentNames} fallback covers deployments without the a2a server beans; it
+     *  unifies the suffix derivation, but its BASE name is only as aligned as those two
+     *  properties are kept. */
     public String cardName() {
-        String base = properties.agent().name();
-        return cellName == null || cellName.isBlank() ? base : base + "__" + cellName.trim();
+        if (selfCard != null) {
+            return selfCard.name();
+        }
+        return com.#exampleframe#.orchestrator.config.CellAgentNames.cellCardName(properties.agent().name(), cellName);
     }
 
     @GetMapping("/.well-known/agent.json")

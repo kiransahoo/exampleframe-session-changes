@@ -1,0 +1,779 @@
+server:
+  port: 8081
+  ssl:
+    enabled: ${SERVER_SSL_ENABLED:false}
+    bundle: ${SERVER_SSL_BUNDLE:}
+
+spring:
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:}
+  ssl:
+    bundle:
+      pem:
+        server:
+          keystore:
+            certificate: ${SPRING_SSL_BUNDLE_PEM_SERVER_KEYSTORE_CERTIFICATE:}
+            private-key: ${SPRING_SSL_BUNDLE_PEM_SERVER_KEYSTORE_PRIVATE_KEY:}
+          truststore:
+            certificate: ${SPRING_SSL_BUNDLE_PEM_SERVER_TRUSTSTORE_CERTIFICATE:}
+  cloud:
+    compatibility-verifier:
+      enabled: false
+  autoconfigure:
+    exclude:
+      - org.springframework.boot.autoconfigure.data.redis.RedisAutoConfiguration
+      - org.springframework.boot.autoconfigure.cassandra.CassandraAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.cassandra.CassandraDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.cassandra.CassandraRepositoriesAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.cassandra.CassandraHealthContributorAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.redis.RedisReactiveAutoConfiguration
+      # MongoDB - disabled because thread history & service context are routed to Cassandra.
+      # The starter is still on the classpath (so MongoConfig classes compile), but no client/health-check is created.
+      - org.springframework.boot.autoconfigure.mongo.MongoAutoConfiguration
+      - org.springframework.boot.autoconfigure.mongo.MongoReactiveAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoReactiveDataAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoRepositoriesAutoConfiguration
+      - org.springframework.boot.autoconfigure.data.mongo.MongoReactiveRepositoriesAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.data.mongo.MongoHealthContributorAutoConfiguration
+      - org.springframework.boot.actuate.autoconfigure.data.mongo.MongoReactiveHealthContributorAutoConfiguration
+      - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiChatAutoConfiguration
+      - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiEmbeddingAutoConfiguration
+      - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiImageAutoConfiguration
+      - org.springframework.ai.model.azure.openai.autoconfigure.AzureOpenAiAudioTranscriptionAutoConfiguration
+  application:
+    name: #exampleframe#-orchestrator-agent
+
+  ai:
+    # Spring AI Alibaba A2A Configuration (required for A2A starter)
+    alibaba:
+      a2a:
+        nacos:
+          server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+          username: ${NACOS_USERNAME:nacos}
+          password: ${NACOS_PASSWORD:nacos}
+          group: agent-endpoints
+          discovery:
+            enabled: ${A2A_DISCOVERY_ENABLED:true}   # Discover other agents (K8s, Oracle)
+          registry:
+            enabled: ${A2A_REGISTRY_ENABLED:true}    # Register THIS agent to Nacos
+        server:
+          version: "1.0.0"
+          card:
+            # MUST match ReactAgent.name(). On a cell (federation.cell-name set),
+            # CellAgentCardPostProcessor rewrites the card bean to <name>__<cell-name>
+            # before Nacos registration, so the registered name equals the one the
+            # /.well-known/agent.json endpoint advertises and the meta's
+            # remote-agents.<cell>.name looks up.
+            name: orchestrator_agent
+            description: "#ExampleFrame# RCA Orchestrator - Multi-agent coordinator for Root Cause Analysis and Remediation"
+            url: http://${server.address:localhost}:${server.port:8081}/a2a/message
+            provider:
+              name: #ExampleFrame#
+              organization: #ExampleFrame#
+              url: ""
+              contact:
+                email: ""
+
+    anthropic:
+      api-key: ${ANTHROPIC_API_KEY:}
+      chat:
+        options:
+          model: claude-sonnet-4-5-20250929
+          max-tokens: 64000
+          temperature: 0.1
+
+    openai:
+      api-key: ${OPENAI_API_KEY:}
+      chat:
+        options:
+          model: gpt-4o
+          temperature: 0.1
+
+    # Enable Spring AI observations for cost tracking
+    chat:
+      observations:
+        log-prompt: false
+        log-completion: false
+        include-error-logging: true
+
+  data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/#exampleframe#-orchestrator}
+      auto-index-creation: true
+      uuid-representation: standard
+
+# #ExampleFrame# Orchestrator Agent Configuration
+#exampleframe#:
+  # Microsoft Entra ID (Azure AD) SSO - set via environment variables
+  auth:
+    enabled: ${AUTH_ENABLED:false}
+    client-id: ${AUTH_CLIENT_ID:}
+    tenant-id: ${AUTH_TENANT_ID:}
+    authority: ${AUTH_AUTHORITY:}
+    default-access-groups: ${AUTH_DEFAULT_ACCESS_GROUPS:}
+    # --- Server-side API protection (enforced when enabled=true) ---
+    # Access tokens are validated on every /api/** call: signature (tenant JWKS), issuer,
+    # expiry, and audience. The UI requests `api-scope` so the token is issued for THIS
+    # app (aud = client-id / api://client-id), not for Microsoft Graph.
+    audience: ${AUTH_AUDIENCE:}                    # default: client-id
+    api-scope: ${AUTH_API_SCOPE:}                  # default: api://<client-id>/access_as_user
+    # Roles from Entra `groups` (object IDs) or app `roles` claims. Empty = every
+    # authenticated tenant user gets that role (dev-friendly; WARN logged for operator).
+    viewer-groups: ${AUTH_VIEWER_GROUPS:}          # read + investigate
+    operator-groups: ${AUTH_OPERATOR_GROUPS:}      # + edit mappings, approve HITL, delete threads
+    admin-groups: ${AUTH_ADMIN_GROUPS:}
+
+  security:
+    # Service-to-service shared secret (X-Service-Token). Sent by this orchestrator on
+    # every A2A call to agents/cells; required by agents and by this orchestrator's own
+    # A2A ingress when set. Independent of user auth. Empty = disabled (WARN).
+    service-token: ${TB_SERVICE_TOKEN:}
+    # CORS allowed origins for a separately hosted UI (comma-separated). Empty = "*"
+    # (same as before; safe with bearer tokens, no cookies).
+    cors-origins: ${TB_CORS_ORIGINS:}
+
+  # Cost observability - tracks per-model token costs, exports to Prometheus
+  observability:
+    cost:
+      enabled: ${COST_TRACKING_ENABLED:true}
+      models:
+        # Anthropic models (with prompt caching)
+        claude-sonnet-4-5-20250929:
+          input-price-per-million: 3.00
+          output-price-per-million: 15.00
+          cache-read-price-per-million: 0.30
+          cache-write-price-per-million: 3.75
+        claude-haiku-4-6:
+          input-price-per-million: 1.00
+          output-price-per-million: 5.00
+          cache-read-price-per-million: 0.10
+          cache-write-price-per-million: 1.25
+        # OpenAI models
+        gpt-4o:
+          input-price-per-million: 2.50
+          output-price-per-million: 10.00
+          cache-read-price-per-million: 1.25
+        "[gpt-4.1]":
+          input-price-per-million: 2.00
+          output-price-per-million: 8.00
+          cache-read-price-per-million: 0.50
+
+  orchestrator:
+    agent:
+      name: orchestrator_agent
+      provider: ${LLM_PROVIDER:OPENAI}
+      max-tool-calls: 50
+      tool-token-limit: 8000
+      max-retries: 3
+      enable-human-approval: ${ENABLE_HUMAN_APPROVAL:true}
+      enable-logging: true
+      min-length-to-summarize: ${MIN_LENGTH_TO_SUMMARIZE:15000}  # responses below this char count are passed to LLM as-is
+    # Agent types this deployment does not have (comma-separated keys from remote-agents),
+    # e.g. a cell with only Kubernetes and dbt: DISABLED_AGENTS=oracle,azure-monitor. Removes
+    # them from delegation tools, health probes, topology and A2A discovery.
+    disabled-agents: ${DISABLED_AGENTS:}
+    # Cell identity (Shape 2): the domain this orchestrator is the cell for. Its A2A card then
+    # reads orchestrator_agent__<cell-name>, which is what the meta's remote-agents entry names.
+    federation:
+      cell-name: ${CELL_NAME:}
+    # Onboard a cluster from the Settings UI: upload its kubeconfig, the orchestrator creates a
+    # Secret + Deployment + Service for a kubernetes-agent instance in `namespace`, waits for
+    # its agent card and registers it. Needs RBAC on secrets/deployments/services in that
+    # namespace (#exampleframe#-deployment/deployment.yaml: Role #exampleframe#-provisioner). Off = the
+    # UI only offers "register an existing URL".
+    provisioning:
+      enabled: ${PROVISIONING_ENABLED:false}
+      namespace: ${PROVISIONING_NAMESPACE:}                 # empty = this pod's namespace
+      kubeconfig: ${PROVISIONING_KUBECONFIG:}               # dev only; in-cluster SA when empty
+      context: ${PROVISIONING_KUBE_CONTEXT:}
+      images:
+        kubernetes: ${PROVISIONING_IMAGE_KUBERNETES:}
+      url-template: ${PROVISIONING_URL_TEMPLATE:http://{name}.{namespace}.svc:{port}}
+      secrets-name: ${PROVISIONING_SECRETS_NAME:#exampleframe#-secrets}   # OPENAI_API_KEY / TB_SERVICE_TOKEN for the pod
+      image-pull-policy: ${PROVISIONING_IMAGE_PULL_POLICY:IfNotPresent}
+      ready-timeout-seconds: ${PROVISIONING_READY_TIMEOUT:240}
+      env:
+        NACOS_SERVER_ADDR: ${NACOS_SERVER_ADDR:localhost:8848}
+    service-context:
+      store-type: ${SERVICE_CONTEXT_STORE:cassandra}
+    app-context:
+      services:
+        order-service:
+          aliases: "order,order-api,OrderService,order-svc"
+          azure-monitor.packageName: "com.#exampleframe#.order"
+          azure-monitor.cloudRoleName: "order-service"
+          # NO kubernetes.workload here: identity values are auto-indexed as aliases, so a
+          # sample mapping claiming a real pod name (this once said workload: java-healthy)
+          # hijacks every question that names that pod - and, with no 'domain' key, the
+          # meta's ownership guard then fail-closes the delegation and interrogates the
+          # user about a service they never mentioned. A sample must not name real infra.
+        checkout-service:
+          aliases: "checkout,checkout-api,checkout-svc"
+          azure-monitor.packageName: "com.#exampleframe#.scenarios.apierror"
+          azure-monitor.cloudRoleName: "checkout-service"
+          kubernetes.namespace: "default"
+          kubernetes.workload: "checkout-service"
+        inventory-service:
+          aliases: "inventory,inventory-api,inventory-svc"
+          azure-monitor.packageName: "com.#exampleframe#.scenarios.badcode"
+          azure-monitor.cloudRoleName: "inventory-service"
+          kubernetes.namespace: "default"
+          kubernetes.workload: "inventory-service"
+        payment-service:
+          aliases: "payment,payment-api,payment-svc"
+          azure-monitor.packageName: "com.#exampleframe#.scenarios.oracleslow"
+          azure-monitor.cloudRoleName: "payment-service"
+          kubernetes.namespace: "default"
+          kubernetes.workload: "payment-service"
+          oracle.schema: "#EXAMPLEFRAME#"
+          oracle.tables: "PERF_TEST_ORDERS,PERF_TEST_PAYMENTS,PERF_TEST_CUSTOMERS"
+    # A2A Protocol Configuration (custom - for fallback/direct URL mode)
+    a2a:
+      enabled: ${A2A_ENABLED:true}
+      nacos:
+        server-addr: ${NACOS_SERVER_ADDR:localhost:8848}
+        namespace: ${NACOS_NAMESPACE:public}
+        group: ${NACOS_GROUP:agent-endpoints}
+
+    # Incident intake from the alerting system (POST /api/incidents).
+    # Primary auth is the gateway (mTLS/OAuth2 + IP allow-list per the roadmap);
+    # the api-key is the in-app backstop. Callback URLs are validated against SSRF:
+    # https-only, public addresses only, optional host pinning.
+    incidents:
+      intake:
+        api-key: ${INCIDENT_INTAKE_API_KEY:}          # empty = gateway-auth only (WARN at startup)
+      callback:
+        require-https: ${INCIDENT_CALLBACK_REQUIRE_HTTPS:true}
+        allow-private-networks: ${INCIDENT_CALLBACK_ALLOW_PRIVATE:false}  # true for local dev only
+        allowed-hosts: ${INCIDENT_CALLBACK_ALLOWED_HOSTS:}  # e.g. "*.alerts.example.com" - empty = any public host
+        max-retries: 3
+        retry-backoff-ms: 2000
+        timeout-ms: 30000
+
+    # Instance routing (cell-per-domain architecture).
+    # Routing targets live in the service mapping as ordinary keys, e.g.
+    #   kubernetes.cluster: claims-prod  |  oracle.database: claims-db  |  {agent}.instance: <key>
+    # A service with no routing key delegates exactly as before. Per-agent named
+    # instances are declared under remote-agents.<agent>.instances (see example there).
+    routing:
+      enabled: ${INSTANCE_ROUTING_ENABLED:true}
+      # Optional per-agent override of which mapping param names the instance:
+      # instance-keys:
+      #   kubernetes: aks-cluster
+
+    # Remote Agent Configuration (used for both Nacos discovery and fallback URL mode)
+    remote-agents:
+      azure-monitor:
+        url: ${AZURE_MONITOR_AGENT_URL:http://localhost:8084}
+        name: azure_monitor_agent
+        description: "Azure Monitor telemetry analysis agent for traces, exceptions, performance hotspots, KQL queries, dependency analysis, and source code analysis via GitHub/Azure DevOps"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        capabilities:
+          - natural-language-kql
+          - raw-kql-queries
+          - trace-analysis
+          - trace-by-id
+          - exception-investigation
+          - error-analysis-by-class
+          - performance-hotspots
+          - operation-metrics
+          - dependency-analysis
+          - trace-statistics
+          - class-discovery
+          - package-discovery
+          - source-code-analysis
+          - trace-chain-analysis
+          - hotspot-code-analysis
+          - repository-browsing
+        layer: application
+        investigation-priority: 1
+        when-to-use: >
+          ALWAYS start here for service issues. Traces and exceptions reveal WHAT
+          is happening at the application level before you decide WHERE to look next.
+          Dependency data shows if the problem is DB, external HTTP, or internal processing.
+          Source code analysis can correlate slow operations to specific code paths.
+        tool-name: delegateToAzureMonitorAgent
+        parameters:
+          task: "Pass the user's CURRENT message for this turn EXACTLY as they typed it. Do NOT rewrite, summarize, or reformulate. If this turn is a clarification (namespace/pod/table/etc), keep it as-is and rely on priorFindings for broader context."
+          timeRange: "Time range for the query (e.g., '1h', '24h', '7d'). CRITICAL: Extract from the user's ORIGINAL question, not just the current turn. If the user said '50 hrs' in the first message, ALWAYS use '50h' even on follow-up delegations. Defaults to '1h' only if NO time reference exists anywhere in the conversation."
+          packageName: "Java package prefix to scope telemetry by operation name (e.g., com.#exampleframe#.scenarios.oracleslow). Auto-filled from app-context - do NOT guess or infer."
+          cloudRoleName: "App Insights cloud role name / service display name (e.g., payment-service). Auto-filled from app-context - do NOT guess or infer."
+        parameter-defaults:
+          timeRange: "1h"
+        example-queries:
+          exception-investigation:
+            - "Show all exceptions in the last hour grouped by type and operation"
+            - "What are the top 5 exception types by count in the last 24 hours?"
+            - "Show the full stack trace for the most recent NullReferenceException"
+            - "Are there any new exception types that appeared in the last 2 hours?"
+          performance-investigation:
+            - "Find slowest requests by P95 response time with dependency breakdown"
+            - "Show requests with response time > 5s and their dependencies"
+            - "Compare request latency between the last hour and the previous hour"
+          dependency-investigation:
+            - "Show all failed dependency calls in the last 30 minutes grouped by target"
+            - "What is the average response time for database dependencies?"
+            - "Show dependency calls with response time > 2 seconds"
+          trace-investigation:
+            - "Trace the request with operation ID [op-id] through all services"
+            - "Show all requests that touched [service-name] in the last 15 minutes"
+            - "Show the complete request flow for failed operations in the last hour"
+          source-code-analysis:
+            - "Fetch and analyze the source code for [class-name] - what queries does it execute?"
+            - "Show source code for the class handling [endpoint] - identify potential issues"
+
+      kubernetes:
+        url: ${K8S_AGENT_URL:http://localhost:8082}
+        name: kubernetes_agent
+        description: "Kubernetes cluster management and JVM diagnostics agent for pods, deployments, services, logs, events, and JVM analysis (threads, heap, GC, JFR)"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        # Named instances for cell routing: a service whose mapping carries
+        # kubernetes.cluster (or kubernetes.instance) delegates to the matching entry.
+        # The instance name defaults to <name>__<instance-key> (agent-side convention).
+        # instances:
+        #   claims-prod:
+        #     url: http://k8s-agent.tb-claims:8082
+        #   claims-nonprod:
+        #     url: http://k8s-agent-nonprod.tb-claims:8082
+        capabilities:
+          - pod-management
+          - deployment-management
+          - statefulset-management
+          - daemonset-management
+          - service-management
+          - job-management
+          - hpa-management
+          - log-analysis
+          - log-search
+          - event-monitoring
+          - cluster-health
+          - node-management
+          - resource-quotas
+          - configmap-inspection
+          - secret-listing
+          - pvc-management
+          - ingress-inspection
+          - pod-exec
+          - jvm-sidecar-deployment
+          - jvm-thread-analysis
+          - jvm-heap-analysis
+          - jvm-memory-histogram
+          - jvm-gc-analysis
+          - jvm-flight-recorder
+          - remediation
+        layer: infrastructure
+        investigation-priority: 2
+        when-to-use: >
+          Check pods, deployments, logs, events for any service under investigation.
+          Always check pod health and resource usage when investigating a service issue.
+          Ask for namespace and pod details if not provided by the user.
+        tool-name: delegateToKubernetesAgent
+        parameters:
+          task: "Pass the user's CURRENT message for this turn EXACTLY as they typed it. Do NOT rewrite, summarize, or reformulate. If this turn is a clarification (namespace/pod/deployment), keep it as-is and use priorFindings for broader issue context."
+          namespace: "Kubernetes namespace the user specified (e.g. 'production', 'staging'). Only pass a value if the user explicitly named a namespace. Do NOT guess or infer from the service name. NEVER default to 'default'. If the user did not explicitly say a namespace, pass 'all' so the agent searches across all namespaces."
+          podName: "Exact pod name when the user explicitly provides one. Only pass if explicitly stated by user; do not infer."
+          workload: "Optional workload identifier (deployment/statefulset/daemonset/service) if explicitly provided by the user."
+        scope-parameters: []
+        parameter-defaults:
+          namespace: "all"
+        example-queries:
+          pod-investigation:
+            - "Show all pods for [service] with status, restarts, resource usage"
+            - "List pods with restarts > 0 in the last hour and their restart reasons"
+            - "Show pods in CrashLoopBackOff with their recent logs"
+            - "Get CPU/memory actual vs requests vs limits for all pods in namespace [ns]"
+          deployment-investigation:
+            - "Describe deployment [name] and show current replica status"
+            - "Show rollout history for deployment [name]"
+            - "What deployments changed in the last 2 hours?"
+          logs-investigation:
+            - "Get logs from pod [pod] showing ERROR or WARN in last 30 minutes"
+            - "Show logs from all pods in deployment [name] with keyword [keyword]"
+            - "Get previous container logs for pod [pod] (before restart)"
+          events-investigation:
+            - "Get all Warning events in namespace [ns] in the last 30 minutes"
+            - "Show events related to pod [pod-name]"
+            - "What events occurred around [timestamp]?"
+          remediation:
+            - "Restart pod [pod-name] to recover from error state"
+            - "Scale deployment [name] to [count] replicas"
+            - "Rollback deployment [name] to previous revision"
+
+      oracle:
+        url: ${ORACLE_AGENT_URL:http://localhost:8083}
+        name: oracle_agent
+        description: "Oracle database agent for session analysis, lock diagnostics, SQL performance, AWR/ASH analysis, resource monitoring, and remediation"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        capabilities:
+          - database-overview
+          - wait-event-analysis
+          - data-guard-lag
+          - parameter-inspection
+          - invalid-object-detection
+          - table-inspection
+          - active-session-analysis
+          - transaction-analysis
+          - blocking-session-detection
+          - session-details
+          - long-running-session-detection
+          - lock-diagnostics
+          - row-lock-contention
+          - top-sql-analysis
+          - sql-details
+          - sql-monitor-report
+          - execution-plan-analysis
+          - hot-segment-detection
+          - datafile-io-analysis
+          - temp-usage-analysis
+          - undo-pressure-analysis
+          - sga-analysis
+          - pga-analysis
+          - tablespace-usage
+          - redo-log-status
+          - alert-log-errors
+          - instance-errors
+          - scheduler-failures
+          - ash-summary
+          - awr-snapshots
+          - awr-top-sql
+          - remediation
+        layer: database
+        investigation-priority: 3
+        when-to-use: >
+          Query Oracle when evidence from application telemetry points to DB issues
+          (slow SQL, connection errors, SqlTimeoutException). Don't query speculatively -
+          wait for traces or exceptions that indicate a database problem.
+        tool-name: delegateToOracleAgent
+        parameters:
+          task: "Pass the user's CURRENT message for this turn EXACTLY as they typed it. Do NOT rewrite, summarize, or reformulate. If this turn is a clarification (schema/table/service), keep it as-is and rely on priorFindings for broader context."
+          schema: "Optional schema context to focus the investigation. Leave empty for database-wide queries."
+          tables: "Database table names ONLY if explicitly mentioned by the user or found in source code from prior agent findings. Do NOT guess table names from the service name. Leave empty if no tables were explicitly identified."
+        scope-parameters: []
+        parameter-defaults: {}
+        example-queries:
+          session-investigation:
+            - "Show all active sessions and what they're executing"
+            - "List sessions with status ACTIVE for more than 60 seconds"
+            - "Show sessions grouped by program and machine"
+          blocking-investigation:
+            - "Show all blocking sessions and the sessions they are blocking"
+            - "Find sessions waiting on locks for more than 30 seconds"
+            - "Show the complete blocking tree (who blocks whom)"
+          performance-investigation:
+            - "Find top 10 SQL statements by elapsed time in the last hour"
+            - "Show execution plan for SQL ID [sql-id]"
+            - "Find full table scans on large tables"
+          resource-investigation:
+            - "Show tablespace usage - any over 80% capacity?"
+            - "Show connection pool status - are we near the limit?"
+            - "What is current SGA and PGA utilization?"
+          remediation:
+            - "Kill session SID [sid] SERIAL# [serial] - blocking critical transactions"
+            - "Gather statistics on table [schema].[table] - suspect stale stats"
+            - "Flush shared pool - suspect bad execution plans cached"
+
+      dbt:
+        url: ${DBT_AGENT_URL:http://localhost:8085}
+        name: dbt_agent
+        description: "dbt pipeline monitoring agent for build investigation, error analysis, pipeline health tracking, and pipeline re-run triggering (with human approval)"
+        timeout-seconds: ${A2A_TIMEOUT:4000}
+        retry-count: 3
+        capabilities:
+          - build-investigation
+          - build-error-analysis
+          - build-log-inspection
+          - pipeline-monitoring
+          - pipeline-rerun-trigger
+        layer: data-pipeline
+        investigation-priority: 4
+        when-to-use: >
+          Query the dbt agent when the user asks about dbt builds, pipeline failures,
+          build errors, build log investigation for data pipeline problems, or when
+          the user wants to trigger a pipeline re-run (requires human approval).
+        tool-name: delegateToDbtAgent
+        parameters:
+          task: "Pass the user's CURRENT message for this turn EXACTLY as they typed it."
+          buildId: "Build ID if explicitly mentioned by the user."
+          definitionId: "Pipeline definition ID if explicitly mentioned by the user."
+        scope-parameters: []
+        parameter-defaults: {}
+
+    # Investigation workflow configuration
+    investigation:
+      default-first-agent: azure-monitor
+      workflows:
+        service-slow:
+          name: "Service Performance Investigation"
+          trigger: "Service is slow, high latency, timeout errors"
+          steps:
+            - agent: azure-monitor
+              action: "Get request latency by operation and dependency breakdown - identify WHERE the time is spent"
+            - agent: kubernetes
+              action: "Check pods for the service: status, restarts, CPU/memory usage vs limits, throttling"
+            - agent: azure-monitor
+              action: "Get source code for slow operations to identify queries and code paths"
+              condition: "if DB dependency is the bottleneck"
+            - agent: oracle
+              action: "Check execution plans for identified queries - look for missing indexes, full scans, stale stats"
+              condition: "if specific DB queries identified from traces or source code"
+        service-errors:
+          name: "Service Error Investigation"
+          trigger: "500 errors, exceptions, error rate spikes"
+          steps:
+            - agent: azure-monitor
+              action: "Get exceptions by type, operation, and stack traces for the last hour"
+            - agent: kubernetes
+              action: "Check pod health, restarts, OOM events, container logs for errors"
+            - agent: azure-monitor
+              action: "Get source code for the failing class to understand the bug"
+              condition: "if application-level exception (NullReference, logic error)"
+            - agent: oracle
+              action: "Check session count, blocking, connection limits for the specific error"
+              condition: "if SqlException or connection errors found in traces"
+        service-down:
+          name: "Service Unavailability Investigation"
+          trigger: "Service down, 503s, connection refused, not reachable"
+          steps:
+            - agent: kubernetes
+              action: "Check pod status, readiness probes, events, CrashLoopBackOff"
+            - agent: kubernetes
+              action: "Check container logs and previous container logs for crash reason"
+              condition: "if pods are in CrashLoopBackOff"
+            - agent: azure-monitor
+              action: "Check failed requests and dependency failures"
+              condition: "if pods are healthy but service is down"
+            - agent: oracle
+              action: "Check connection count vs limit, listener status"
+              condition: "if DB connection refused errors found"
+        db-slow:
+          name: "Database Performance Investigation"
+          trigger: "Database slow, blocking sessions, lock contention"
+          steps:
+            - agent: oracle
+              action: "Check blocking tree, wait events, top SQL by elapsed time"
+            - agent: oracle
+              action: "Get execution plans for problem SQL"
+            - agent: azure-monitor
+              action: "When did DB dependency latency increase? Correlate with blocking start time"
+            - agent: kubernetes
+              action: "Check connection errors in application logs"
+              condition: "if connection issues suspected"
+        pod-restarts:
+          name: "Pod Restart Investigation"
+          trigger: "Pod restarts, OOM kills, CrashLoopBackOff"
+          steps:
+            - agent: kubernetes
+              action: "Check restart history, exit codes, memory usage trends"
+            - agent: azure-monitor
+              action: "Check memory-related exceptions or errors around restart times"
+            - agent: oracle
+              action: "Check session count changes around restart times - connection storm?"
+              condition: "possible connection storm after restart"
+
+    # Playbook routing configuration
+    playbooks:
+      routing:
+        mode: LLM            # LLM | REGEX | HYBRID | VECTOR
+        min-score: 0.75      # Strong match threshold - runs playbook directly
+        soft-match-score: 0.40  # Soft match - routes to playbook for prompting only if required params are missing
+        top-k: 3
+
+  thread:
+    context-window: 15
+
+    # Summarization configuration
+    summarization:
+      max-tokens-before-summary: 40000
+      max-messages-to-keep: 8
+      max-turns-before-summary: 25
+      max-tool-results-before-summary: 20
+      agent:
+        provider: ${SUMMARIZATION_PROVIDER:OPENAI}
+        model: ${SUMMARIZATION_MODEL:claude-sonnet-4-5-20250929}
+        temperature: 0.3
+
+    # Checkpoint storage - MongoDB by default
+    # Supported types: in_memory, mongodb, cassandra
+    checkpoint:
+      type: cassandra
+      mongo-db:
+        collection-name: orchestrator_checkpoints
+        document-prefix: "orch:checkpoint:"
+        document-content-key: checkpoint_content
+        thread-meta-collection-name: orchestrator_thread_meta
+        thread-meta-prefix: "orch:thread:meta:"
+      cassandra:
+        contact-points: ${CASSANDRA_CONTACT_POINTS:localhost}
+        port: ${CASSANDRA_PORT:9042}
+        keyspace: ${CASSANDRA_KEYSPACE:#exampleframe#}
+        local-datacenter: ${CASSANDRA_LOCAL_DC:datacenter1}
+        username: ${CASSANDRA_USERNAME:}
+        password: ${CASSANDRA_PASSWORD:}
+        thread-meta-table: checkpoint_thread_meta
+        checkpoint-table: checkpoint_data
+        schema-action: create_if_not_exists
+
+    # Thread history storage - MongoDB by default
+    # Supported types: in_memory, mongodb, cassandra
+    history:
+      type: cassandra
+      mongo-db:
+        thread-collection-name: orchestrator_threads
+        thread-document-prefix: "orch:thread:"
+        message-collection-name: orchestrator_messages
+        message-document-prefix: "orch:message:"
+      cassandra:
+        contact-points: ${CASSANDRA_CONTACT_POINTS:localhost}
+        port: ${CASSANDRA_PORT:9042}
+        keyspace: ${CASSANDRA_KEYSPACE:#exampleframe#}
+        local-datacenter: ${CASSANDRA_LOCAL_DC:datacenter1}
+        username: ${CASSANDRA_USERNAME:}
+        password: ${CASSANDRA_PASSWORD:}
+        thread-table-name: orchestrator_threads
+        message-table-name: orchestrator_messages
+        listing-table-name: orchestrator_threads_listing
+        ttl-days: 90
+        schema-action: create_if_not_exists
+
+    cache:
+      tool-execution:
+        cache-name: orchestratorToolExecutions
+
+# OpenAPI/Swagger
+springdoc:
+  swagger-ui:
+    path: /swagger-ui
+  api-docs:
+    path: /swagger
+
+# Logging
+logging:
+  level:
+    root: INFO
+    com.#exampleframe#.orchestrator: DEBUG
+    com.alibaba.cloud.ai: INFO
+  file:
+    name: #exampleframe#-orchestrator/orchestrator.log
+  pattern:
+    console: "%d{HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      max-file-size: 50MB
+      max-history: 7
+      total-size-cap: 500MB
+
+---
+# Profile: local (for local development with in-memory storage, NO Nacos)
+spring:
+  config:
+    activate:
+      on-profile: local
+
+  ai:
+    alibaba:
+      a2a:
+        nacos:
+          discovery:
+            enabled: false
+          registry:
+            enabled: false
+
+#exampleframe#:
+  orchestrator:
+    agent:
+      provider: OPENAI
+    a2a:
+      enabled: false
+  thread:
+    checkpoint:
+      type: cassandra
+    history:
+      type: cassandra
+
+logging:
+  level:
+    com.#exampleframe#.orchestrator: DEBUG
+    com.alibaba.cloud.ai: DEBUG
+
+---
+# Profile: openai (use OpenAI as primary provider)
+spring:
+  config:
+    activate:
+      on-profile: openai
+
+#exampleframe#:
+  orchestrator:
+    agent:
+      provider: OPENAI
+  thread:
+    summarization:
+      agent:
+        provider: OPENAI
+        model: gpt-4o
+
+---
+# Profile: nacos (enable A2A with Nacos discovery - PRODUCTION)
+spring:
+  config:
+    activate:
+      on-profile: nacos
+
+  ai:
+    alibaba:
+      a2a:
+        nacos:
+          discovery:
+            enabled: true
+          registry:
+            enabled: true
+
+#exampleframe#:
+  orchestrator:
+    a2a:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  health:
+    livenessState:
+      enabled: true
+    readinessState:
+      enabled: true
+    redis:
+      enabled: false
+
+logging:
+  level:
+    com.alibaba.cloud.ai: DEBUG
+    com.alibaba.nacos: INFO
+
+---
+# Profile: kubernetes (deployed in K8s - stdout only, kubelet handles rotation)
+spring:
+  config:
+    activate:
+      on-profile: kubernetes
+
+logging:
+  file:
+    name:
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} [%thread] %-5level %logger{36} - %msg%n"
+  level:
+    root: INFO
+    com.#exampleframe#.orchestrator: DEBUG
+    com.alibaba.cloud.ai: INFO
