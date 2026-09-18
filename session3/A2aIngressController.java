@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import com.#exampleframe#.orchestrator.service.HitlAwareA2aClient;
 import com.#exampleframe#.orchestrator.service.InvestigationStateService;
 import com.#exampleframe#.orchestrator.service.PlaybookExecutor;
+import com.#exampleframe#.orchestrator.service.PlaybookContinuationService;
 import com.#exampleframe#.orchestrator.service.PlaybookResolver;
 import com.#exampleframe#.orchestrator.thread.history.model.Message;
 import com.#exampleframe#.orchestrator.thread.history.model.ThreadKey;
@@ -561,6 +562,26 @@ public class A2aIngressController {
                 hitlAwareA2aClient.clearOrchestratorThreadId();
             }
             investigationStateService.resolveClaimedHitl(taskId, claimed, output);
+            // The gate paused a PLAYBOOK step: run the remaining steps and synthesise, so the
+            // forwarding meta receives the full investigation, not the child's answer alone.
+            if (playbookContinuationService != null && playbookExecutor != null) {
+                var continuation = playbookContinuationService.claim(taskId);
+                if (continuation != null) {
+                    try {
+                        String report = playbookExecutor.resumeContinuation(continuation, output);
+                        persistPlaybookTurn(continuation.threadId(), continuation.originalQuery(), report);
+                        return ResponseEntity.ok(success(requestId,
+                                cellThread != null ? cellThread : taskId, report, cellThread, false));
+                    } catch (ChildAgentHitlException next) {
+                        // A later step raised its own gate; the executor stored its pending
+                        // record and re-parked the continuation under the new taskId.
+                        return ResponseEntity.ok(pendingApproval(requestId, cellThread, next, false));
+                    } catch (Exception ex) {
+                        logger.warn("Playbook continuation after ingress resume failed - returning "
+                                + "the child's answer alone: {}", ex.getMessage(), ex);
+                    }
+                }
+            }
             // Cost travels only when the real conversation thread is known - a HITL task id
             // is not a session key and must not be looked up as one.
             return ResponseEntity.ok(success(requestId, cellThread != null ? cellThread : taskId, output,
@@ -570,6 +591,9 @@ public class A2aIngressController {
             // record with the new pending task, preserving the original owner and thread.
             investigationStateService.chainClaimedHitl(
                     claimed, chained.getTaskId(), chained.getAgentName(), chained.getAgentBaseUrl());
+            if (playbookContinuationService != null) {
+                playbookContinuationService.rekey(taskId, chained.getTaskId());
+            }
             return ResponseEntity.ok(pendingApproval(requestId, cellThread, chained, false));
         } catch (Exception e) {
             // Delivery failed: put the approval back so the meta can retry it.
@@ -621,6 +645,13 @@ public class A2aIngressController {
     @org.springframework.beans.factory.annotation.Autowired(required = false)
     public void setDelegationExecutionService(@Nullable DelegationExecutionService service) {
         this.delegationExecutionService = service;
+    }
+
+    private @Nullable PlaybookContinuationService playbookContinuationService;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setPlaybookContinuationService(@Nullable PlaybookContinuationService service) {
+        this.playbookContinuationService = service;
     }
 
     @org.springframework.beans.factory.annotation.Value("${#exampleframe#.orchestrator.federation.cell-name:}")
