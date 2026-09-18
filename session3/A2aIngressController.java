@@ -189,8 +189,34 @@ public class A2aIngressController {
                 investigationStateService.initThread(threadId);
             }
 
-            String playbookAnswer = tryPlaybook(rawTask != null ? rawTask : input,
-                    taskParams, threadId, followUpTurn);
+            String playbookAnswer;
+            try {
+                playbookAnswer = tryPlaybook(rawTask != null ? rawTask : input,
+                        taskParams, threadId, followUpTurn);
+            } catch (com.#exampleframe#.orchestrator.exception.CellInputRequiredException e) {
+                // Same relay shape as pending_approval: the forwarding meta prompts the user
+                // for the named keys and re-forwards the original request with them merged.
+                Map<String, Object> result = new HashMap<>();
+                result.put("status", "input_required");
+                result.put("taskId", threadId);
+                result.put("playbookId", e.getPlaybookId());
+                result.put("playbookName", e.getPlaybookName());
+                result.put("missingKeys", e.getMissingKeys());
+                List<Map<String, String>> missingParams = new ArrayList<>();
+                e.getMissingPrompts().forEach((k, v) ->
+                        missingParams.add(Map.of("key", k, "prompt", v)));
+                result.put("missingParams", missingParams);
+                // Defense in depth: a client that ignores the status and extracts output
+                // renders a readable sentence, never "Completed but no output extracted".
+                result.put("output", "This playbook needs values for: "
+                        + String.join(", ", e.getMissingKeys())
+                        + ". Re-send the request with them as taskParams.");
+                Map<String, Object> response = new HashMap<>();
+                response.put("jsonrpc", "2.0");
+                response.put("id", requestId);
+                response.put("result", result);
+                return ResponseEntity.ok(response);
+            }
             if (playbookAnswer != null) {
                 return ResponseEntity.ok(success(requestId, threadId, playbookAnswer,
                         threadId, contextId == null));
@@ -278,6 +304,36 @@ public class A2aIngressController {
             return null;
         }
         if (!resolution.missingRequiredKeys().isEmpty()) {
+            // Only a caller that DECLARED it understands input_required may receive it: an
+            // older meta (and any pin-only third party - the pin alone sets the marker)
+            // treats the unknown status as completed and renders "no output" garbage, which
+            // is strictly worse than the ReAct fallback. The capability param is sent only
+            // by metas carrying the relay loop.
+            boolean acceptsInputRequired = "true".equalsIgnoreCase(taskParams.get(
+                    com.#exampleframe#.orchestrator.federation.MetaPlaybookRouting.ACCEPTS_INPUT_REQUIRED_PARAM));
+            if (deterministicForward && acceptsInputRequired) {
+                // The forwarding meta relays the question to the user and re-forwards the
+                // original request with the answer merged - the same loop pending_approval
+                // already rides. Deferring to ReAct here silently degrades the investigation
+                // instead (one-agent answer for a question the direct door runs as a full
+                // playbook after prompting). The cell's own prompt wording travels too: the
+                // meta's param definitions may not know a cell-only key.
+                logger.info("Playbook '{}' missing required params {} on the delegated path - "
+                                + "returning input_required to the forwarding meta",
+                        resolution.playbookId(), resolution.missingRequiredKeys());
+                java.util.Map<String, String> prompts = new LinkedHashMap<>();
+                for (var missing : resolution.missingParams()) {
+                    if (!missing.optional() && missing.prompt() != null && !missing.prompt().isBlank()) {
+                        prompts.put(missing.key(), missing.prompt());
+                    }
+                }
+                throw new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
+                        properties.agent() != null ? cardName() : "cell", threadId,
+                        resolution.playbookId(), resolution.definition().name(),
+                        resolution.missingRequiredKeys(), prompts);
+            }
+            // A plain A2A caller (an agent, a third party, an older meta) has no user to
+            // relay a prompt to: the ReAct fallback remains the best available answer.
             logger.info("Playbook '{}' missing required params {} on the delegated path - deferring to ReAct",
                     resolution.playbookId(), resolution.missingRequiredKeys());
             return null;

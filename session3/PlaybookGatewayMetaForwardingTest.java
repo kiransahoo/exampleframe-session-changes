@@ -606,4 +606,79 @@ class PlaybookGatewayMetaForwardingTest {
         assertThat(again).contains("didn't recognize");
         verify(delegationExecutionService, never()).delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), any());
     }
+
+    /**
+     * The CELL is the authority on what its mapping can fill: when it answers
+     * input_required (its playbook needs e.g. an oracle schema no mapping supplies),
+     * the meta relays the SAME question the cell's own door would ask, then re-forwards
+     * the ORIGINAL request with the reply merged as caller-provided params - so a
+     * "why is X slow" runs the full playbook through the meta exactly as it does on
+     * the cell's direct door, instead of silently degrading to a one-agent answer.
+     */
+    @Test
+    void cellInputRequiredIsRelayedAndTheReplyResumesTheForward() {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenThrow(new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
+                        "orchestrator_agent__claims", "a2a-claims-t-ir", "service-slow",
+                        "Service Performance Investigation", List.of("schema")));
+
+        String prompt = run(q, "t-ir");
+        assertThat(prompt).contains("schema");
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-ir"),
+                anyMap(), isNull());
+
+        // The reply merges in as the user's own words and the original question re-forwards.
+        org.mockito.Mockito.reset(delegationExecutionService);
+        llmExtracts("schema=all");
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenReturn("FULL CELL RCA");
+        String out = run("all, -", "t-ir");
+
+        assertThat(out).contains("FULL CELL RCA");
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-ir"),
+                argThat(m -> "all".equals(m.get("schema")) && "true".equals(m.get("deterministicForward"))), isNull());
+    }
+
+    /**
+     * Replies that fill none of the awaited keys must not cost a cell round-trip: the
+     * meta re-asks locally, and drops the pending at the bound instead of ping-ponging
+     * meta<->cell forever.
+     */
+    @Test
+    void uselessRepliesReAskLocallyAndTheLoopIsBounded() {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenThrow(new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
+                        "orchestrator_agent__claims", "a2a-claims-t-loop", "service-slow",
+                        "Service Performance Investigation", List.of("schema"),
+                        Map.of("schema", "Which Oracle schema?")));
+
+        String prompt = run(q, "t-loop");
+        assertThat(prompt).contains("Which Oracle schema?");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+
+        // Garbage reply #1: no awaited value extracted -> local re-ask, NO new delegation.
+        llmExtracts("schema=UNKNOWN");
+        String reAsk = run("hmm", "t-loop");
+        assertThat(reAsk).contains("Which Oracle schema?");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+
+        // Garbage reply #2: the pending is dropped with an explanation, still no delegation.
+        String dropped = run("idk", "t-loop");
+        assertThat(dropped).contains("dropped");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+    }
 }

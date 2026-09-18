@@ -328,4 +328,84 @@ class A2aIngressPlaybookTest {
         verifyNoInteractions(executor);
         verify(resolver, never()).resolve(anyString(), anyMap());
     }
+
+    // ---- input_required: the delegated door's answer to missing user-only params ----
+
+    /**
+     * A deterministic forward whose playbook lacks required values must NOT silently
+     * degrade to ReAct: the forwarding meta can relay a question to the user, so the
+     * cell answers input_required naming the keys - the pending_approval contract's
+     * sibling - and the meta re-forwards with the reply merged.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void missingParamsOnADeterministicForwardReturnInputRequired() throws Exception {
+        when(resolver.resolve(eq("why is esign slow"), anyMap())).thenReturn(Optional.of(
+                new PlaybookResolver.Resolution("service-slow", DEFINITION, false,
+                        Map.of("service", "esign", "timeRange", "2h"),
+                        List.of(new PlaybookResolver.MissingParam(
+                                "schema", "Which Oracle schema?", false)))));
+
+        Map<String, Object> request = message("why is esign slow",
+                Map.of("contextId", "meta-thread-ir",
+                        "rawTask", "why is esign slow",
+                        "taskParams", Map.of("deterministicForward", "true", "acceptsInputRequired", "true")));
+        Map<String, Object> res = result(ingress.handleMessage(request).getBody());
+
+        assertThat(res.get("status")).isEqualTo("input_required");
+        assertThat((List<String>) res.get("missingKeys")).containsExactly("schema");
+        assertThat(res.get("playbookId")).isEqualTo("service-slow");
+        assertThat(res.get("playbookName")).isEqualTo("Service Performance Investigation");
+        assertThat((List<Map<String, String>>) res.get("missingParams"))
+                .containsExactly(Map.of("key", "schema", "prompt", "Which Oracle schema?"));
+        assertThat(String.valueOf(res.get("output"))).contains("schema");
+        verifyNoInteractions(executor);
+        verify(runner, never()).investigate(any());
+    }
+
+    /**
+     * Version skew: an OLDER meta sends the marker but not the capability param, and a
+     * pin-only third party sets the marker via the pin alone - both must keep the ReAct
+     * fallback, because they render an unknown status as garbage instead of a prompt.
+     */
+    @Test
+    void markerWithoutTheCapabilityParamKeepsTheReActFallback() throws Exception {
+        when(resolver.resolve(eq("why is esign slow"), anyMap())).thenReturn(Optional.of(
+                new PlaybookResolver.Resolution("service-slow", DEFINITION, false,
+                        Map.of("service", "esign"),
+                        List.of(new PlaybookResolver.MissingParam(
+                                "schema", "Which Oracle schema?", false)))));
+        when(runner.investigate(any(InvestigationRunner.InvestigationTask.class)))
+                .thenReturn("react answer");
+
+        Map<String, Object> request = message("why is esign slow",
+                Map.of("contextId", "old-meta-1",
+                        "rawTask", "why is esign slow",
+                        "taskParams", Map.of("deterministicForward", "true")));
+        Map<String, Object> res = result(ingress.handleMessage(request).getBody());
+
+        assertThat(res.get("status")).isEqualTo("completed");
+        assertThat(res.get("output")).isEqualTo("react answer");
+        verifyNoInteractions(executor);
+    }
+
+    /** A plain A2A caller has no user to relay a prompt to - the ReAct fallback stands. */
+    @Test
+    void missingParamsWithoutTheMarkerStillDeferToReAct() throws Exception {
+        when(resolver.resolve(eq("why is esign slow"), anyMap())).thenReturn(Optional.of(
+                new PlaybookResolver.Resolution("service-slow", DEFINITION, false,
+                        Map.of("service", "esign"),
+                        List.of(new PlaybookResolver.MissingParam(
+                                "schema", "Which Oracle schema?", false)))));
+        when(runner.investigate(any(InvestigationRunner.InvestigationTask.class)))
+                .thenReturn("react answer");
+
+        Map<String, Object> request = message("why is esign slow",
+                Map.of("contextId", "plain-caller-1", "rawTask", "why is esign slow"));
+        Map<String, Object> res = result(ingress.handleMessage(request).getBody());
+
+        assertThat(res.get("status")).isEqualTo("completed");
+        assertThat(res.get("output")).isEqualTo("react answer");
+        verifyNoInteractions(executor);
+    }
 }

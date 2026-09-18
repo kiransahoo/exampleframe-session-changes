@@ -36,6 +36,16 @@ public final class MetaPlaybookRouting {
      */
     public static final String DETERMINISTIC_FORWARD_PARAM = "deterministicForward";
 
+    /**
+     * Capability declaration: the forwarding meta understands a {@code status: input_required}
+     * answer (it relays the cell's param question to the user and re-forwards with the reply).
+     * A cell must NEVER send input_required without seeing this - an older meta treats the
+     * unknown status as completed and renders "Completed but no output extracted" instead of
+     * falling back to ReAct, which is strictly worse than the pre-relay behavior. The marker
+     * alone is not enough: pin-only third-party callers set it too.
+     */
+    public static final String ACCEPTS_INPUT_REQUIRED_PARAM = "acceptsInputRequired";
+
     public enum Kind { PASS_THROUGH, ASK_DOMAIN, DELEGATE }
 
     public record Decision(Kind kind,

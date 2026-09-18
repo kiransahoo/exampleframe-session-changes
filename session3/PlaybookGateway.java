@@ -560,6 +560,9 @@ public class PlaybookGateway {
             extra.put("playbookId", match.playbookId());
         }
         extra.put(MetaPlaybookRouting.DETERMINISTIC_FORWARD_PARAM, "true");
+        // Declares THIS meta handles a status:input_required answer (relay + re-forward).
+        // Control key: without it the cell must keep the old defer-to-ReAct fallback.
+        extra.put(MetaPlaybookRouting.ACCEPTS_INPUT_REQUIRED_PARAM, "true");
         extra.put("domain", decision.domain());
         params.forEach((k, v) -> {
             if (v != null && !v.isBlank() && !"UNKNOWN".equalsIgnoreCase(v)
@@ -579,7 +582,9 @@ public class PlaybookGateway {
                 match.playbookId(), decision.domain(), cellKey, decision.service(), originalQuery.length(),
                 explicitReference ? "pinned by the user's reference" : "cell routes it");
 
-        investigationStateService.recordUserMessage(threadId, originalQuery);
+        if (!resumedAfterPersist.contains(threadId)) {
+            investigationStateService.recordUserMessage(threadId, originalQuery);
+        }
 
         if (!agentResponseSinkRegistry.register(threadId)) {
             // Transient refusal: another stream owns this conversation right now. Keep the
@@ -599,7 +604,9 @@ public class PlaybookGateway {
         investigationStateService.bindCurrentThread(threadId);
 
         final ThreadKey threadKey = ThreadKey.of(DEFAULT_APP_NAME, userId, threadId);
-        persistMessageAsync(threadKey, originalQuery, Message.MessageRole.USER);
+        if (!resumedAfterPersist.remove(threadId)) {
+            persistMessageAsync(threadKey, originalQuery, Message.MessageRole.USER);
+        }
 
         // Guards the delegation's side effects against a cancelled stream: after the client
         // goes away (refresh, timeout) this conversation may register a NEW sink under the
@@ -635,6 +642,52 @@ public class PlaybookGateway {
                 }
                 return buildAssistantEvent("The " + decision.domain()
                         + " cell needs an approval before it can continue.");
+            } catch (com.#exampleframe#.orchestrator.exception.CellInputRequiredException e) {
+                // The CELL matched a playbook but needs values only the user can supply, and
+                // the delegated path cannot prompt - so the cell answered input_required
+                // (the pending_approval contract's sibling) and THIS door asks the user the
+                // question the cell's own door would have asked. The reply resumes through
+                // resumeMetaForward: extracted values join callerProvidedKeys (user
+                // provenance - they must travel even for app-context keys like schema,
+                // because the cell just said its mapping cannot fill them) and the original
+                // request is re-forwarded with them merged.
+                // Cell-supplied strings are cross-boundary data: sanitize keys before they
+                // reach logs or the prompt, and never park on an empty key list (an
+                // awaiting-nothing pending would silently swallow the next message).
+                List<String> awaitKeys = e.getMissingKeys().stream()
+                        .map(k -> k == null ? "" : k.replaceAll("[\\r\\n\\t]", " ").trim())
+                        .filter(k -> !k.isBlank())
+                        .limit(8)
+                        .toList();
+                if (awaitKeys.isEmpty()) {
+                    logger.warn("[meta-playbook] cell '{}' answered input_required for '{}' with no "
+                            + "usable keys - treating as a plain answer", cellKey, e.getPlaybookId());
+                    return buildAssistantEvent("The " + decision.domain() + " cell needs more "
+                            + "details to run this playbook, but did not say which. "
+                            + "Re-ask with the specifics included.");
+                }
+                if (!streamActive.get()) {
+                    // The turn is already dead (disconnect or timeout): the prompt would
+                    // reach nobody, and a parked pending would hijack the user's NEXT
+                    // message as the answer to a question that was never shown.
+                    logger.warn("[meta-playbook] cell '{}' answered input_required after the "
+                            + "stream for thread {} ended - not parking", cellKey, threadId);
+                    return buildAssistantEvent("The " + decision.domain()
+                            + " cell needs more details (" + String.join(", ", awaitKeys)
+                            + ") - ask again to continue.");
+                }
+                logger.info("[meta-playbook] cell '{}' needs user input for '{}' - asking: {}",
+                        cellKey, e.getPlaybookId(), awaitKeys);
+                // Prefer the CELL's own prompt wording: the motivating case is a key the
+                // meta's param definitions may not know.
+                List<MissingParam> ask = promptsFor(awaitKeys, e.getMissingPrompts());
+                // originalTurnPersisted=true: THIS attempt already recorded and persisted
+                // originalQuery above - the resumed forward must not do it again.
+                pendingMetaForwards.put(threadId, new PendingMetaForward(
+                        match.playbookId(), match.definition(), params, decision.domain(),
+                        callerProvidedKeys, explicitReference, awaitKeys,
+                        originalQuery, Instant.now(), e.getMissingPrompts(), 0, true));
+                return buildParamPromptEvent(match.playbookId(), match.definition().name(), ask);
             } finally {
                 InvestigationStateService.CURRENT_THREAD_ID.remove();
             }
@@ -689,6 +742,14 @@ public class PlaybookGateway {
      */
     private final ConcurrentHashMap<String, PendingMetaForward> pendingMetaForwards = new ConcurrentHashMap<>();
 
+    /**
+     * Threads whose CURRENT forward re-entry resumes a pending that already recorded and
+     * persisted the original user message (the input_required park happens AFTER the
+     * forward's persist ran) - the re-entered forward must not write it a second time.
+     * Set immediately before the resume's forwardToOwningCell call, consumed inside it.
+     */
+    private final Set<String> resumedAfterPersist = ConcurrentHashMap.newKeySet();
+
     private record PendingMetaForward(
             String playbookId,
             PlaybookProperties.PlaybookDefinition definition,
@@ -698,8 +759,25 @@ public class PlaybookGateway {
             boolean explicitReference,
             List<String> awaiting,
             String originalUserMessage,
-            Instant createdAt
-    ) {}
+            Instant createdAt,
+            /* Cell-authored prompt per awaited key (input_required relay); empty elsewhere. */
+            Map<String, String> awaitingPrompts,
+            /* Replies that filled none of the awaited keys; the loop is dropped at the bound. */
+            int failedAttempts,
+            /* True when the parking attempt already recorded+persisted originalUserMessage
+               (the input_required park happens AFTER the forward's persist), so the resumed
+               forward must not record it a second time. */
+            boolean originalTurnPersisted
+    ) {
+        PendingMetaForward(String playbookId, PlaybookProperties.PlaybookDefinition definition,
+                           Map<String, String> params, @Nullable String chosenDomain,
+                           Set<String> callerProvidedKeys, boolean explicitReference,
+                           List<String> awaiting, String originalUserMessage, Instant createdAt) {
+            this(playbookId, definition, params, chosenDomain, callerProvidedKeys,
+                    explicitReference, awaiting, originalUserMessage, createdAt,
+                    Map.of(), 0, false);
+        }
+    }
 
     private static final java.util.regex.Pattern CANCEL_RE = java.util.regex.Pattern.compile(
             "\\b(cancel|abort|stop|never\\s?mind|forget\\s+(it|that|the\\s+playbook))\\b",
@@ -820,9 +898,65 @@ public class PlaybookGateway {
             }
         }
 
+        // A reply that filled NONE of the awaited keys must not cost a cell round-trip
+        // (the cell would only answer input_required again - each bounce burns its full
+        // LLM resolve). Re-ask locally, and give up after the bound: a key the extractor
+        // can never fill (garbage answers, or a param key its normalization mangles)
+        // would otherwise ping-pong meta<->cell forever.
+        if (!pending.awaiting().isEmpty() && !pending.awaiting().contains(AWAITING_DOMAIN)) {
+            boolean progress = pending.awaiting().stream()
+                    .anyMatch(k -> blankToNull(params.get(k)) != null);
+            if (!progress) {
+                if (pending.failedAttempts() + 1 >= 2) {
+                    logger.warn("[meta-playbook] '{}': no awaited value in {} replies - dropping the pending",
+                            pending.playbookId(), pending.failedAttempts() + 1);
+                    return Flux.just(buildAssistantEvent(
+                            "I still couldn't read values for " + String.join(", ", pending.awaiting())
+                            + " from that. I've dropped the pending **" + pending.playbookId()
+                            + "** run - ask again with the values in the question itself."));
+                }
+                logger.info("[meta-playbook] '{}': reply filled none of {} - asking again (attempt {})",
+                        pending.playbookId(), pending.awaiting(), pending.failedAttempts() + 1);
+                pendingMetaForwards.put(threadId, new PendingMetaForward(
+                        pending.playbookId(), pending.definition(), params, chosenDomain,
+                        callerKeys, pending.explicitReference(), pending.awaiting(),
+                        pending.originalUserMessage(), pending.createdAt(),
+                        pending.awaitingPrompts(), pending.failedAttempts() + 1,
+                        pending.originalTurnPersisted()));
+                return Flux.just(buildParamPromptEvent(pending.playbookId(),
+                        pending.definition().name(), promptsFor(pending.awaiting(), pending.awaitingPrompts())));
+            }
+        }
+
+        if (pending.originalTurnPersisted()) {
+            resumedAfterPersist.add(threadId);
+        }
         PlaybookMatch match = new PlaybookMatch(pending.playbookId(), pending.definition(), false);
         return forwardToOwningCell(match, params, chosenDomain, callerKeys,
                 pending.explicitReference(), pending.originalUserMessage(), threadId, userId);
+    }
+
+    /** Prompt list for awaited keys: the CELL's own wording when it sent one, else local defs. */
+    private List<MissingParam> promptsFor(List<String> keys, Map<String, String> cellPrompts) {
+        return keys.stream()
+                .map(key -> {
+                    String cellPrompt = cellPrompts.get(key);
+                    if (cellPrompt != null && !cellPrompt.isBlank()) {
+                        return new MissingParam(key, sanitizePromptText(cellPrompt), false);
+                    }
+                    var def = playbookProperties.paramDefinitions().get(key);
+                    return new MissingParam(key,
+                            def != null && def.prompt() != null && !def.prompt().isBlank()
+                                    ? def.prompt() : "Which " + key + "?",
+                            false);
+                })
+                .toList();
+    }
+
+    /** Cross-boundary prompt text: control chars stripped, length capped for the UI line. */
+    private static String sanitizePromptText(String prompt) {
+        String cleaned = prompt.replaceAll("\\p{Cntrl}", " ").trim();
+        return cleaned.length() > 200 ? cleaned.substring(0, 200) + "..." : cleaned;
     }
 
     /**
