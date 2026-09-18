@@ -865,9 +865,30 @@ public class PlaybookGateway {
                     params.put("service", service);
                     callerKeys.add("service");
                 } else {
-                    logger.info("[meta-playbook] '{}': reply names neither a domain nor a service - asking again",
-                            pending.playbookId());
-                    pendingMetaForwards.put(threadId, pending);
+                    // Bounded, like the awaited-keys branch: an answer that resolves nothing
+                    // twice in a row must not loop the same question forever (the cell door
+                    // concludes gracefully for a service that exists nowhere; endless
+                    // re-interrogation is the door asymmetry a nonexistent service exposed).
+                    if (pending.failedAttempts() + 1 >= 2) {
+                        logger.info("[meta-playbook] '{}': no domain or service in {} replies - dropping the ask",
+                                pending.playbookId(), pending.failedAttempts() + 1);
+                        return Flux.just(buildAssistantEvent(
+                                "I couldn't match that to a known domain or service, so I've dropped the "
+                                        + "pending **" + pending.playbookId() + "** run. Known domains: "
+                                        + String.join(", ", new TreeSet<>(cells.keySet()))
+                                        + ". If the service exists, ask again with its name in the "
+                                        + "question; if it may not exist anywhere, say so and I'll "
+                                        + "investigate what IS running instead."));
+                    }
+                    logger.info("[meta-playbook] '{}': reply names neither a domain nor a service - asking again "
+                                    + "(attempt {})", pending.playbookId(), pending.failedAttempts() + 1);
+                    pendingMetaForwards.put(threadId, new PendingMetaForward(
+                            pending.playbookId(), pending.definition(), pending.params(),
+                            pending.chosenDomain(), pending.callerProvidedKeys(),
+                            pending.explicitReference(), pending.awaiting(),
+                            pending.originalUserMessage(), pending.createdAt(),
+                            pending.awaitingPrompts(), pending.failedAttempts() + 1,
+                            pending.originalTurnPersisted()));
                     return Flux.just(buildAssistantEvent(
                             "I didn't recognize a domain or service in that. Known domains: "
                                     + String.join(", ", new TreeSet<>(cells.keySet()))
