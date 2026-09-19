@@ -202,15 +202,21 @@ public class A2aIngressController {
                 result.put("taskId", threadId);
                 result.put("playbookId", e.getPlaybookId());
                 result.put("playbookName", e.getPlaybookName());
+                // missingKeys stays the REQUIRED set (an older meta awaits exactly that list);
+                // optional keys ride alongside, and each prompt entry says which it is.
                 result.put("missingKeys", e.getMissingKeys());
-                List<Map<String, String>> missingParams = new ArrayList<>();
+                result.put("optionalKeys", e.getOptionalKeys());
+                List<Map<String, Object>> missingParams = new ArrayList<>();
                 e.getMissingPrompts().forEach((k, v) ->
-                        missingParams.add(Map.of("key", k, "prompt", v)));
+                        missingParams.add(Map.of("key", k, "prompt", v,
+                                "optional", e.getOptionalKeys().contains(k))));
                 result.put("missingParams", missingParams);
                 // Defense in depth: a client that ignores the status and extracts output
                 // renders a readable sentence, never "Completed but no output extracted".
                 result.put("output", "This playbook needs values for: "
                         + String.join(", ", e.getMissingKeys())
+                        + (e.getOptionalKeys().isEmpty() ? ""
+                                : " (optional: " + String.join(", ", e.getOptionalKeys()) + ")")
                         + ". Re-send the request with them as taskParams.");
                 Map<String, Object> response = new HashMap<>();
                 response.put("jsonrpc", "2.0");
@@ -322,16 +328,23 @@ public class A2aIngressController {
                 logger.info("Playbook '{}' missing required params {} on the delegated path - "
                                 + "returning input_required to the forwarding meta",
                         resolution.playbookId(), resolution.missingRequiredKeys());
+                // The direct door lists the still-empty OPTIONAL params in the same question
+                // (labelled optional, skippable with '-'), so the relay carries them too, in
+                // playbook order: the meta's question must be the cell door's question.
                 java.util.Map<String, String> prompts = new LinkedHashMap<>();
+                List<String> optionalKeys = new ArrayList<>();
                 for (var missing : resolution.missingParams()) {
-                    if (!missing.optional() && missing.prompt() != null && !missing.prompt().isBlank()) {
+                    if (missing.prompt() != null && !missing.prompt().isBlank()) {
                         prompts.put(missing.key(), missing.prompt());
+                    }
+                    if (missing.optional()) {
+                        optionalKeys.add(missing.key());
                     }
                 }
                 throw new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
                         properties.agent() != null ? cardName() : "cell", threadId,
                         resolution.playbookId(), resolution.definition().name(),
-                        resolution.missingRequiredKeys(), prompts);
+                        resolution.missingRequiredKeys(), prompts, optionalKeys);
             }
             // A plain A2A caller (an agent, a third party, an older meta) has no user to
             // relay a prompt to: the ReAct fallback remains the best available answer.

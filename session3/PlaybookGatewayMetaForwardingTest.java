@@ -681,4 +681,173 @@ class PlaybookGatewayMetaForwardingTest {
         verify(delegationExecutionService, org.mockito.Mockito.times(1))
                 .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
     }
+
+    private void cellAsksSchemaWithOptionalTables(String taskId) {
+        Map<String, String> cellPrompts = new java.util.LinkedHashMap<>();
+        cellPrompts.put("schema", "Which Oracle schema?");
+        cellPrompts.put("tables", "Which database tables?");
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenThrow(new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
+                        "orchestrator_agent__claims", taskId, "service-slow",
+                        "Service Performance Investigation", List.of("schema"), cellPrompts, List.of("tables")));
+    }
+
+    /**
+     * The cell's own door lists its still-empty OPTIONAL params in the same question,
+     * labelled optional and skippable with '-'. The relay must show the IDENTICAL question
+     * (cell order, cell wording, the label) and forward an answered optional value with the
+     * required one - otherwise the two doors ask different questions for one playbook.
+     */
+    @Test
+    void optionalKeysAreOfferedLikeTheDirectDoorAndTravelWhenAnswered() {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+        cellAsksSchemaWithOptionalTables("a2a-claims-t-opt");
+
+        String prompt = run(q, "t-opt");
+        assertThat(prompt).contains("- **schema**: Which Oracle schema?");
+        assertThat(prompt).contains("- **tables** *(optional)*: Which database tables?");
+        assertThat(prompt.indexOf("**schema**")).isLessThan(prompt.indexOf("**tables**"));
+        assertThat(prompt).contains("Use `-` to skip optional fields");
+
+        org.mockito.Mockito.reset(delegationExecutionService);
+        llmExtracts("schema=all\ntables=all");
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenReturn("FULL CELL RCA");
+        String out = run("all, -", "t-opt");
+
+        assertThat(out).contains("FULL CELL RCA");
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-opt"),
+                argThat(m -> "all".equals(m.get("schema")) && "all".equals(m.get("tables"))
+                        && "true".equals(m.get("deterministicForward"))), isNull());
+    }
+
+    /**
+     * An optional key is offered, never awaited: a reply that fills only the optional value
+     * is no progress toward running the playbook (the cell would only answer input_required
+     * again), so the meta re-asks locally - keeping what it did read, and no longer listing
+     * it, like the direct door - and the retained optional value travels once the required
+     * one arrives.
+     */
+    @Test
+    void aReplyFillingOnlyAnOptionalKeyReAsksAndKeepsTheValue() {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+        cellAsksSchemaWithOptionalTables("a2a-claims-t-opt2");
+
+        run(q, "t-opt2");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+
+        llmExtracts("schema=UNKNOWN\ntables=orders");
+        String reAsk = run("-, orders", "t-opt2");
+        assertThat(reAsk).contains("- **schema**: Which Oracle schema?");
+        // Like the direct door's re-prompt: an answered optional is not listed again.
+        assertThat(reAsk).doesNotContain("**tables**");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+
+        org.mockito.Mockito.reset(delegationExecutionService);
+        llmExtracts("schema=claims");
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenReturn("FULL CELL RCA");
+        String out = run("claims", "t-opt2");
+
+        assertThat(out).contains("FULL CELL RCA");
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-opt2"),
+                argThat(m -> "CLAIMS".equals(m.get("schema")) && "orders".equals(m.get("tables"))), isNull());
+    }
+
+    /**
+     * The meta's OWN mapping may pre-fill app-context keys (schema, tables) - values that
+     * never travel to the cell (the forward gate strips mapping-derived values) and that
+     * the cell just said ITS mapping cannot fill. They must neither mask the user's answer
+     * for an offered optional key nor count as progress for an awaited required one (which
+     * would re-forward an unanswered question and reset the re-ask bound every time).
+     */
+    @Test
+    void metaMappingPrefillNeverMasksTheUsersAnswerOrCountsAsProgress() {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+        org.mockito.Mockito.doAnswer(inv -> {
+            Map<String, String> p = inv.getArgument(0);
+            p.put("schema", "APPSCHEMA");
+            p.put("tables", "ORDERS_LEGACY");
+            return null;
+        }).when(resolver).applyAppContext(anyMap(), anyString());
+        cellAsksSchemaWithOptionalTables("a2a-claims-t-prefill");
+
+        String prompt = run(q, "t-prefill");
+        assertThat(prompt).contains("- **tables** *(optional)*: Which database tables?");
+        // Mapping-derived values never travelled - that is why the cell asked.
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-prefill"),
+                argThat(m -> m.get("schema") == null && m.get("tables") == null), isNull());
+
+        // Garbage reply: the mapping's schema must not count as progress -> local re-ask, no round-trip.
+        llmExtracts("schema=UNKNOWN\ntables=UNKNOWN");
+        String reAsk = run("hmm", "t-prefill");
+        assertThat(reAsk).contains("- **schema**: Which Oracle schema?");
+        assertThat(reAsk).contains("- **tables** *(optional)*: Which database tables?");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+
+        // Real reply: BOTH keys are put to the extractor and both travel with user provenance.
+        org.mockito.Mockito.reset(delegationExecutionService);
+        org.mockito.ArgumentCaptor<Prompt> asked = org.mockito.ArgumentCaptor.forClass(Prompt.class);
+        llmExtracts("schema=all\ntables=orders");
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenReturn("FULL CELL RCA");
+        String out = run("all, orders", "t-prefill");
+        assertThat(out).contains("FULL CELL RCA");
+        verify(chatModel, org.mockito.Mockito.atLeastOnce()).call(asked.capture());
+        assertThat(asked.getAllValues().stream().map(Prompt::getContents).toList())
+                .anyMatch(s -> s.contains("- schema:") && s.contains("- tables:"));
+        verify(delegationExecutionService).delegateToAgentPinned(eq("claims-cell"), eq(q), eq("t-prefill"),
+                argThat(m -> "all".equals(m.get("schema")) && "orders".equals(m.get("tables"))), isNull());
+    }
+
+    /**
+     * Cross-boundary lists are cell data: a key the cell lists as BOTH required and optional
+     * is awaited (required wins) and shown once, unlabelled; duplicates collapse; and a key
+     * offered only as optional with no cell prompt still renders (local definition or a
+     * generic prompt) rather than vanishing from the question.
+     */
+    @Test
+    void aKeyListedAsBothRequiredAndOptionalIsAwaitedAndShownOnce() throws Exception {
+        String q = "why is esign slow in the last 2h ?";
+        explicit(q, "service-slow");
+        when(router.extractParameters(anyString(), any(), any())).thenReturn(new HashMap<>(
+                Map.of("service", "esign", "timeRange", "2h")));
+        when(domainCellRouter.owningDomain("esign")).thenReturn(Optional.of("claims"));
+        when(delegationExecutionService.delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull()))
+                .thenThrow(new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
+                        "orchestrator_agent__claims", "a2a-claims-t-dup", "service-slow",
+                        "Service Performance Investigation", List.of("schema", "schema"),
+                        Map.of("schema", "Which Oracle schema?"), List.of("schema", "tables", "tables")));
+
+        String prompt = run(q, "t-dup");
+        assertThat(prompt).contains("- **schema**: Which Oracle schema?");
+        assertThat(prompt).doesNotContain("**schema** *(optional)*");
+        assertThat(prompt).contains("- **tables** *(optional)*: Which tables?");
+        // The event carries the message in both "content" and "chunk": count within one.
+        String content = new ObjectMapper().readTree(prompt.split("\n")[0]).get("content").asText();
+        assertThat(content.indexOf("**schema**")).isEqualTo(content.lastIndexOf("**schema**"));
+        assertThat(content.indexOf("**tables**")).isEqualTo(content.lastIndexOf("**tables**"));
+
+        // schema is awaited: a reply that fills nothing re-asks locally, no cell round-trip.
+        llmExtracts("schema=UNKNOWN\ntables=UNKNOWN");
+        String reAsk = run("hmm", "t-dup");
+        assertThat(reAsk).contains("- **schema**: Which Oracle schema?");
+        verify(delegationExecutionService, org.mockito.Mockito.times(1))
+                .delegateToAgentPinned(anyString(), anyString(), anyString(), anyMap(), isNull());
+    }
 }

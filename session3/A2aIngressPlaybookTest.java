@@ -356,9 +356,41 @@ class A2aIngressPlaybookTest {
         assertThat((List<String>) res.get("missingKeys")).containsExactly("schema");
         assertThat(res.get("playbookId")).isEqualTo("service-slow");
         assertThat(res.get("playbookName")).isEqualTo("Service Performance Investigation");
-        assertThat((List<Map<String, String>>) res.get("missingParams"))
-                .containsExactly(Map.of("key", "schema", "prompt", "Which Oracle schema?"));
+        assertThat((List<String>) res.get("optionalKeys")).isEmpty();
+        assertThat((List<Map<String, Object>>) res.get("missingParams"))
+                .containsExactly(Map.of("key", "schema", "prompt", "Which Oracle schema?", "optional", false));
         assertThat(String.valueOf(res.get("output"))).contains("schema");
+        verifyNoInteractions(executor);
+        verify(runner, never()).investigate(any());
+    }
+
+    /**
+     * The direct door lists a still-empty OPTIONAL param in the same question (labelled,
+     * skippable with '-'). The relay must carry it too - in playbook order, flagged - while
+     * missingKeys stays the REQUIRED set an older meta awaits.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void optionalParamsTravelWithTheRelayFlaggedAndOrdered() throws Exception {
+        when(resolver.resolve(eq("why is esign slow"), anyMap())).thenReturn(Optional.of(
+                new PlaybookResolver.Resolution("service-slow", DEFINITION, false,
+                        Map.of("service", "esign", "timeRange", "2h"),
+                        List.of(new PlaybookResolver.MissingParam("schema", "Which Oracle schema?", false),
+                                new PlaybookResolver.MissingParam("tables", "Which database tables?", true)))));
+
+        Map<String, Object> request = message("why is esign slow",
+                Map.of("contextId", "meta-thread-opt",
+                        "rawTask", "why is esign slow",
+                        "taskParams", Map.of("deterministicForward", "true", "acceptsInputRequired", "true")));
+        Map<String, Object> res = result(ingress.handleMessage(request).getBody());
+
+        assertThat(res.get("status")).isEqualTo("input_required");
+        assertThat((List<String>) res.get("missingKeys")).containsExactly("schema");
+        assertThat((List<String>) res.get("optionalKeys")).containsExactly("tables");
+        assertThat((List<Map<String, Object>>) res.get("missingParams")).containsExactly(
+                Map.of("key", "schema", "prompt", "Which Oracle schema?", "optional", false),
+                Map.of("key", "tables", "prompt", "Which database tables?", "optional", true));
+        assertThat(String.valueOf(res.get("output"))).contains("schema").contains("optional: tables");
         verifyNoInteractions(executor);
         verify(runner, never()).investigate(any());
     }

@@ -329,17 +329,34 @@ public class HitlAwareA2aClient {
                 String playbookName = result.get("playbookName") != null
                         ? String.valueOf(result.get("playbookName")) : playbookId;
                 Map<String, String> prompts = new LinkedHashMap<>();
-                if (result.get("missingParams") instanceof List<?> pairs) {
-                    for (Object o : pairs) {
-                        if (o instanceof Map<?, ?> pair && pair.get("key") != null && pair.get("prompt") != null) {
-                            prompts.put(String.valueOf(pair.get("key")), String.valueOf(pair.get("prompt")));
+                // Optional keys the cell's own door would offer in the same question. Cells
+                // before this field send neither list nor flag - both reads tolerate that.
+                List<String> optionalKeys = new ArrayList<>();
+                if (result.get("optionalKeys") instanceof List<?> ol) {
+                    for (Object o : ol) {
+                        if (o != null && !optionalKeys.contains(String.valueOf(o))) {
+                            optionalKeys.add(String.valueOf(o));
                         }
                     }
                 }
-                logger.info("[{}] === INPUT REQUIRED === playbook '{}', missing keys: {}",
-                        agentName, playbookId, missingKeys);
+                if (result.get("missingParams") instanceof List<?> pairs) {
+                    for (Object o : pairs) {
+                        if (o instanceof Map<?, ?> pair && pair.get("key") != null && pair.get("prompt") != null) {
+                            String key = String.valueOf(pair.get("key"));
+                            prompts.put(key, String.valueOf(pair.get("prompt")));
+                            if (Boolean.parseBoolean(String.valueOf(pair.get("optional")))
+                                    && !optionalKeys.contains(key)) {
+                                optionalKeys.add(key);
+                            }
+                        }
+                    }
+                }
+                // Cell-supplied strings reach a log here before the gateway sanitizes them:
+                // strip line breaks so a hostile key cannot forge a log line.
+                logger.info("[{}] === INPUT REQUIRED === playbook '{}', missing keys: {} (optional: {})",
+                        agentName, logSafe(playbookId), logSafe(missingKeys), logSafe(optionalKeys));
                 throw new com.#exampleframe#.orchestrator.exception.CellInputRequiredException(
-                        agentName, taskId, playbookId, playbookName, missingKeys, prompts);
+                        agentName, taskId, playbookId, playbookName, missingKeys, prompts, optionalKeys);
             }
 
             // Extract child agent cost data and accumulate into orchestrator session
@@ -361,6 +378,11 @@ public class HitlAwareA2aClient {
     // CHILD COST EXTRACTION
 
     @SuppressWarnings("unchecked")
+    /** Log operand from the wire: line breaks and tabs collapsed so it cannot forge a log line. */
+    private static String logSafe(Object value) {
+        return String.valueOf(value).replaceAll("[\\r\\n\\t]", " ");
+    }
+
     private void extractAndAccumulateChildCost(String agentName, Map<String, Object> result) {
         if (sessionCostAccumulator == null) return;
 

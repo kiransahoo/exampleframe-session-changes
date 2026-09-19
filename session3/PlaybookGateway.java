@@ -654,11 +654,7 @@ public class PlaybookGateway {
                 // Cell-supplied strings are cross-boundary data: sanitize keys before they
                 // reach logs or the prompt, and never park on an empty key list (an
                 // awaiting-nothing pending would silently swallow the next message).
-                List<String> awaitKeys = e.getMissingKeys().stream()
-                        .map(k -> k == null ? "" : k.replaceAll("[\\r\\n\\t]", " ").trim())
-                        .filter(k -> !k.isBlank())
-                        .limit(8)
-                        .toList();
+                List<String> awaitKeys = sanitizeKeys(e.getMissingKeys(), List.of());
                 if (awaitKeys.isEmpty()) {
                     logger.warn("[meta-playbook] cell '{}' answered input_required for '{}' with no "
                             + "usable keys - treating as a plain answer", cellKey, e.getPlaybookId());
@@ -678,15 +674,19 @@ public class PlaybookGateway {
                 }
                 logger.info("[meta-playbook] cell '{}' needs user input for '{}' - asking: {}",
                         cellKey, e.getPlaybookId(), awaitKeys);
+                // The cell's door offers its still-empty OPTIONAL params in the same question
+                // (labelled, skippable with '-'); the relay shows the identical question.
+                // Offered, never awaited: a reply filling only an optional key is no progress.
+                List<String> optionalKeys = sanitizeKeys(e.getOptionalKeys(), awaitKeys);
                 // Prefer the CELL's own prompt wording: the motivating case is a key the
                 // meta's param definitions may not know.
-                List<MissingParam> ask = promptsFor(awaitKeys, e.getMissingPrompts());
+                List<MissingParam> ask = promptsFor(awaitKeys, optionalKeys, e.getMissingPrompts());
                 // originalTurnPersisted=true: THIS attempt already recorded and persisted
                 // originalQuery above - the resumed forward must not do it again.
                 pendingMetaForwards.put(threadId, new PendingMetaForward(
                         match.playbookId(), match.definition(), params, decision.domain(),
                         callerProvidedKeys, explicitReference, awaitKeys,
-                        originalQuery, Instant.now(), e.getMissingPrompts(), 0, true));
+                        originalQuery, Instant.now(), e.getMissingPrompts(), 0, true, optionalKeys));
                 return buildParamPromptEvent(match.playbookId(), match.definition().name(), ask);
             } finally {
                 InvestigationStateService.CURRENT_THREAD_ID.remove();
@@ -767,7 +767,11 @@ public class PlaybookGateway {
             /* True when the parking attempt already recorded+persisted originalUserMessage
                (the input_required park happens AFTER the forward's persist), so the resumed
                forward must not record it a second time. */
-            boolean originalTurnPersisted
+            boolean originalTurnPersisted,
+            /* Optional keys the cell's door offers in the same question (input_required
+               relay): shown and extracted when answered, never awaited - filling only these
+               is no progress. Empty elsewhere. */
+            List<String> awaitingOptional
     ) {
         PendingMetaForward(String playbookId, PlaybookProperties.PlaybookDefinition definition,
                            Map<String, String> params, @Nullable String chosenDomain,
@@ -775,7 +779,7 @@ public class PlaybookGateway {
                            List<String> awaiting, String originalUserMessage, Instant createdAt) {
             this(playbookId, definition, params, chosenDomain, callerProvidedKeys,
                     explicitReference, awaiting, originalUserMessage, createdAt,
-                    Map.of(), 0, false);
+                    Map.of(), 0, false, List.of());
         }
     }
 
@@ -888,7 +892,7 @@ public class PlaybookGateway {
                             pending.explicitReference(), pending.awaiting(),
                             pending.originalUserMessage(), pending.createdAt(),
                             pending.awaitingPrompts(), pending.failedAttempts() + 1,
-                            pending.originalTurnPersisted()));
+                            pending.originalTurnPersisted(), pending.awaitingOptional()));
                     return Flux.just(buildAssistantEvent(
                             "I didn't recognize a domain or service in that. Known domains: "
                                     + String.join(", ", new TreeSet<>(cells.keySet()))
@@ -900,6 +904,17 @@ public class PlaybookGateway {
             // staging") - the same courtesy the generic door extends. Reply-extracted values
             // are the user's own words: user provenance.
             List<String> extractionKeys = new ArrayList<>(pending.awaiting());
+            // Offered optional keys the user has not answered yet (a cell-only key may be
+            // unknown to this meta's definitions), then any of the playbook's own params
+            // still blank. "Answered" is USER provenance, not a value in params: the meta's
+            // own mapping may have pre-filled an app-context key, but that value never
+            // travels (the forward gate strips mapping-derived values) and the cell just
+            // said ITS mapping cannot fill the key - it must not mask the user's reply.
+            for (String key : pending.awaitingOptional()) {
+                if (!extractionKeys.contains(key) && !answeredByUser(key, params, callerKeys)) {
+                    extractionKeys.add(key);
+                }
+            }
             if (pending.definition().params() != null) {
                 for (var ref : pending.definition().params()) {
                     String key = ref.ref();
@@ -925,8 +940,11 @@ public class PlaybookGateway {
         // can never fill (garbage answers, or a param key its normalization mangles)
         // would otherwise ping-pong meta<->cell forever.
         if (!pending.awaiting().isEmpty() && !pending.awaiting().contains(AWAITING_DOMAIN)) {
+            // Progress is a USER-provided value: a mapping-derived one never travels, so
+            // counting it would re-forward an unanswered question and re-park at attempt 0
+            // - the bound this branch exists for would never be reached.
             boolean progress = pending.awaiting().stream()
-                    .anyMatch(k -> blankToNull(params.get(k)) != null);
+                    .anyMatch(k -> answeredByUser(k, params, callerKeys));
             if (!progress) {
                 if (pending.failedAttempts() + 1 >= 2) {
                     logger.warn("[meta-playbook] '{}': no awaited value in {} replies - dropping the pending",
@@ -943,9 +961,13 @@ public class PlaybookGateway {
                         callerKeys, pending.explicitReference(), pending.awaiting(),
                         pending.originalUserMessage(), pending.createdAt(),
                         pending.awaitingPrompts(), pending.failedAttempts() + 1,
-                        pending.originalTurnPersisted()));
-                return Flux.just(buildParamPromptEvent(pending.playbookId(),
-                        pending.definition().name(), promptsFor(pending.awaiting(), pending.awaitingPrompts())));
+                        pending.originalTurnPersisted(), pending.awaitingOptional()));
+                // Like the direct door's re-prompt, an optional the user already answered is
+                // not listed again (its value is kept and travels).
+                List<String> openOptional = pending.awaitingOptional().stream()
+                        .filter(k -> !answeredByUser(k, params, callerKeys)).toList();
+                return Flux.just(buildParamPromptEvent(pending.playbookId(), pending.definition().name(),
+                        promptsFor(pending.awaiting(), openOptional, pending.awaitingPrompts())));
             }
         }
 
@@ -957,20 +979,59 @@ public class PlaybookGateway {
                 pending.explicitReference(), pending.originalUserMessage(), threadId, userId);
     }
 
-    /** Prompt list for awaited keys: the CELL's own wording when it sent one, else local defs. */
-    private List<MissingParam> promptsFor(List<String> keys, Map<String, String> cellPrompts) {
+    /**
+     * The relay's question, in the CELL's order (its prompt map is insertion-ordered = its
+     * playbook order, the order its own door lists them): awaited required keys, then the
+     * offered optional keys labelled the way the direct door labels them. The CELL's own
+     * wording wins over local definitions.
+     */
+    private List<MissingParam> promptsFor(List<String> required, List<String> optional,
+                                          Map<String, String> cellPrompts) {
+        List<String> ordered = new ArrayList<>();
+        for (String key : cellPrompts.keySet()) {
+            if ((required.contains(key) || optional.contains(key)) && !ordered.contains(key)) {
+                ordered.add(key);
+            }
+        }
+        for (String key : required) {
+            if (!ordered.contains(key)) ordered.add(key);
+        }
+        for (String key : optional) {
+            if (!ordered.contains(key)) ordered.add(key);
+        }
+        List<MissingParam> ask = new ArrayList<>();
+        for (String key : ordered) {
+            String cellPrompt = cellPrompts.get(key);
+            String prompt;
+            if (cellPrompt != null && !cellPrompt.isBlank()) {
+                prompt = sanitizePromptText(cellPrompt);
+            } else {
+                var def = playbookProperties.paramDefinitions().get(key);
+                prompt = def != null && def.prompt() != null && !def.prompt().isBlank()
+                        ? def.prompt() : "Which " + key + "?";
+            }
+            ask.add(new MissingParam(key, prompt, optional.contains(key)));
+        }
+        return ask;
+    }
+
+    /**
+     * A relayed key counts as answered only with USER provenance and a value: what the
+     * meta's own mapping pre-filled never travels to the cell that asked.
+     */
+    private boolean answeredByUser(String key, Map<String, String> params, Set<String> callerKeys) {
+        return callerKeys.contains(key) && blankToNull(params.get(key)) != null;
+    }
+
+    /** Cross-boundary key list: control chars stripped, blanks/duplicates/excluded dropped, capped. */
+    private static List<String> sanitizeKeys(List<String> keys, List<String> exclude) {
+        if (keys == null) return List.of();
         return keys.stream()
-                .map(key -> {
-                    String cellPrompt = cellPrompts.get(key);
-                    if (cellPrompt != null && !cellPrompt.isBlank()) {
-                        return new MissingParam(key, sanitizePromptText(cellPrompt), false);
-                    }
-                    var def = playbookProperties.paramDefinitions().get(key);
-                    return new MissingParam(key,
-                            def != null && def.prompt() != null && !def.prompt().isBlank()
-                                    ? def.prompt() : "Which " + key + "?",
-                            false);
-                })
+                .map(k -> k == null ? "" : k.replaceAll("[\\r\\n\\t]", " ").trim())
+                .filter(k -> !k.isBlank())
+                .filter(k -> !exclude.contains(k))
+                .distinct()
+                .limit(8)
                 .toList();
     }
 

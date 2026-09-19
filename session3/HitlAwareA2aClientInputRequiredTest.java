@@ -58,9 +58,50 @@ class HitlAwareA2aClientInputRequiredTest {
                     assertThat(e.getMissingKeys()).containsExactly("schema");
                     assertThat(e.getMissingPrompts())
                             .containsExactly(Map.entry("schema", "Which Oracle schema?"));
+                    assertThat(e.getOptionalKeys()).isEmpty();
                     assertThat(e.getPlaybookId()).isEqualTo("service-slow");
                     assertThat(e.getTaskId()).isEqualTo("a2a-claims-t1");
                 });
+    }
+
+    /**
+     * The cell's door offers still-empty OPTIONAL params in the same question; the relay
+     * carries them as optionalKeys plus a per-prompt flag - either alone must suffice, and
+     * the prompt order (the cell's playbook order) must survive the wire.
+     */
+    @Test
+    void optionalKeysAreParsedFromTheListOrThePerPromptFlag() {
+        String withList = """
+                {"jsonrpc":"2.0","id":"r1","result":{
+                  "status":"input_required","taskId":"a2a-claims-t2",
+                  "playbookId":"service-slow","playbookName":"Service Performance Investigation",
+                  "missingKeys":["schema"],"optionalKeys":["tables"],
+                  "missingParams":[{"key":"schema","prompt":"Which Oracle schema?","optional":false},
+                                   {"key":"tables","prompt":"Which database tables?","optional":true}],
+                  "output":"This playbook needs values for: schema (optional: tables)."}}
+                """;
+        assertThatThrownBy(() -> clientReturning(withList)
+                .invokeAgent("claims-cell", "http://localhost:8081", "why is esign slow", null))
+                .isInstanceOf(CellInputRequiredException.class)
+                .satisfies(t -> {
+                    CellInputRequiredException e = (CellInputRequiredException) t;
+                    assertThat(e.getMissingKeys()).containsExactly("schema");
+                    assertThat(e.getOptionalKeys()).containsExactly("tables");
+                    assertThat(e.getMissingPrompts().keySet()).containsExactly("schema", "tables");
+                });
+
+        String flagOnly = """
+                {"jsonrpc":"2.0","id":"r1","result":{
+                  "status":"input_required","taskId":"a2a-claims-t3",
+                  "playbookId":"service-slow","missingKeys":["schema"],
+                  "missingParams":[{"key":"schema","prompt":"Which Oracle schema?"},
+                                   {"key":"tables","prompt":"Which database tables?","optional":"true"}]}}
+                """;
+        assertThatThrownBy(() -> clientReturning(flagOnly)
+                .invokeAgent("claims-cell", "http://localhost:8081", "why is esign slow", null))
+                .isInstanceOf(CellInputRequiredException.class)
+                .satisfies(t -> assertThat(((CellInputRequiredException) t).getOptionalKeys())
+                        .containsExactly("tables"));
     }
 
     @Test

@@ -15,6 +15,11 @@ import java.util.List;
  * the full playbook ({@code A2aIngressController}: "missing required params on the
  * delegated path - deferring to ReAct").
  * <p>
+ * {@code missingKeys} are the REQUIRED keys - the playbook cannot run without them and the
+ * meta awaits them. {@code optionalKeys} are the still-empty optional params the cell's own
+ * door lists in the same question (labelled optional, skippable with '-'): offered and
+ * captured when answered, never awaited.
+ * <p>
  * Unchecked, mirroring {@link ChildAgentHitlException}: it must traverse
  * {@code HitlAwareA2aClient -> AgentInvocationService -> DelegationExecutionService}
  * unwrapped; every catch-all on that path rethrows it explicitly.
@@ -26,17 +31,26 @@ public class CellInputRequiredException extends RuntimeException {
     private final String playbookId;
     private final String playbookName;
     private final List<String> missingKeys;
-    /** Cell-authored prompt per missing key (insertion-ordered); may be empty for old cells. */
+    /** Cell-authored prompt per missing key, required and optional (insertion-ordered = playbook order); may be empty for old cells. */
     private final java.util.Map<String, String> missingPrompts;
+    /** Optional keys offered alongside (insertion-ordered); empty for cells predating the field. */
+    private final List<String> optionalKeys;
 
     public CellInputRequiredException(String agentName, String taskId, String playbookId,
                                       String playbookName, List<String> missingKeys) {
-        this(agentName, taskId, playbookId, playbookName, missingKeys, java.util.Map.of());
+        this(agentName, taskId, playbookId, playbookName, missingKeys, java.util.Map.of(), List.of());
     }
 
     public CellInputRequiredException(String agentName, String taskId, String playbookId,
                                       String playbookName, List<String> missingKeys,
                                       java.util.Map<String, String> missingPrompts) {
+        this(agentName, taskId, playbookId, playbookName, missingKeys, missingPrompts, List.of());
+    }
+
+    public CellInputRequiredException(String agentName, String taskId, String playbookId,
+                                      String playbookName, List<String> missingKeys,
+                                      java.util.Map<String, String> missingPrompts,
+                                      List<String> optionalKeys) {
         super("Cell '" + agentName + "' needs user input for playbook '" + playbookId
                 + "': missing " + missingKeys);
         this.agentName = agentName;
@@ -47,6 +61,7 @@ public class CellInputRequiredException extends RuntimeException {
         this.missingPrompts = missingPrompts == null
                 ? java.util.Map.of()
                 : java.util.Collections.unmodifiableMap(new java.util.LinkedHashMap<>(missingPrompts));
+        this.optionalKeys = optionalKeys == null ? List.of() : List.copyOf(optionalKeys);
     }
 
     public String getAgentName() {
@@ -71,5 +86,9 @@ public class CellInputRequiredException extends RuntimeException {
 
     public java.util.Map<String, String> getMissingPrompts() {
         return missingPrompts;
+    }
+
+    public List<String> getOptionalKeys() {
+        return optionalKeys;
     }
 }
